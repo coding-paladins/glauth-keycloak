@@ -1,0 +1,39 @@
+{
+  "name": "societycell",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "runArgs": [
+    "--network=host"
+  ],
+  "mounts": [
+    "source=${localEnv:HOME}/.ssh,target=/tmp/host-ssh,type=bind,readonly"
+  ],
+  "features": {
+    "ghcr.io/eitsupi/devcontainer-features/go-task:latest": {}
+  },
+  "containerEnv": {
+    "KUBECONFIG": "/workspaces/societycell/kubeconfig"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "bierner.markdown-preview-github-styles",
+        "DavidAnson.vscode-markdownlint",
+        "dhoeric.ansible-vault",
+        "eamodio.gitlens",
+        "esbenp.prettier-vscode",
+        "mhutchie.git-graph",
+        "ms-python.black-formatter",
+        "ms-python.flake8",
+        "oderwat.indent-rainbow",
+        "redhat.ansible",
+        "tamasfe.even-better-toml",
+        "yzhang.markdown-all-in-one",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh"
+}
