@@ -31,6 +31,3 @@ git config --global user.email "$USER_EMAIL"
 git config --global core.editor vim
 git config --global --add safe.directory /workspace
 git config --global --add safe.directory '*'
-
-# Install Python package in editable mode
-pip install -e .

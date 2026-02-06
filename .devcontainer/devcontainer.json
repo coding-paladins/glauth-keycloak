@@ -4,8 +4,11 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
+  "mounts": [
+    "source=${localEnv:HOME}/.ssh,target=/tmp/host-ssh,type=bind,readonly"
+  ],
   "containerEnv": {
-    "KUBECONFIG": "/workspace/kubeconfig"
+    "KUBECONFIG": "/workspace/glauth-keycloak/kubeconfig"
   },
   "customizations": {
     "vscode": {
@@ -15,6 +18,5 @@
       ]
     }
   },
-  "forwardPorts": [8080, 8081],
-  "postCreateCommand": ".devcontainer/postCreateCommand.sh"
+  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh"
 }
