@@ -6,7 +6,7 @@ require (
 	github.com/glauth/glauth/v2 v2.4.0
 	github.com/glauth/ldap v0.0.0-20240419171521-1f14f5c1b4ad
 	github.com/go-resty/resty/v2 v2.11.0
-	github.com/rs/zerolog v1.32.0
+	github.com/rs/zerolog v1.31.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/oauth2 v0.18.0
 )
@@ -21,7 +21,7 @@ require (
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/matttproud/golang_protobuf_extensions/v2 v2.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/pquerna/otp v1.4.0 // indirect

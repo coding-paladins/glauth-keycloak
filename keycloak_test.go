@@ -16,10 +16,13 @@ import (
 
 	"github.com/glauth/ldap"
 	resty "github.com/go-resty/resty/v2"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
 )
+
+var nopLogger = zerolog.Nop()
 
 func init() {
 	allowNilConnectionForTests = true
@@ -38,19 +41,23 @@ func makeHandlerConfigFromURL(t *testing.T, serverURL string) *keycloakHandlerCo
 		scheme = parsed.Scheme
 	}
 	return &keycloakHandlerConfig{
-		keycloakHostname:     parsed.Hostname(),
-		keycloakPort:         port,
-		keycloakRealm:        "test",
-		keycloakScheme:       scheme,
-		ldapDomain:           "example.com",
-		ldapClientID:         "ldap-client",
-		ldapClientSecret:     "secret",
-		userinfoEndpointURL:  serverURL + "/userinfo",
+		keycloakHostname:    parsed.Hostname(),
+		keycloakPort:        port,
+		keycloakRealm:       "test",
+		keycloakScheme:      scheme,
+		ldapDomain:          "example.com",
+		ldapClientID:        "ldap-client",
+		ldapClientSecret:    "secret",
+		userinfoEndpointURL: serverURL + "/userinfo",
 	}
 }
 
 func makeHandlerWithConfig(c *keycloakHandlerConfig) *keycloakHandler {
 	b := "dc=example,dc=com"
+	if c.ldapDomain != "" {
+		parts := strings.Split(c.ldapDomain, ".")
+		b = "dc=" + strings.Join(parts, ",dc=")
+	}
 	var transport http.RoundTripper
 	if c.keycloakScheme != "http" {
 		transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
@@ -149,8 +156,8 @@ func TestTokenEndpoint(t *testing.T) {
 func TestUserinfoEndpoint(t *testing.T) {
 	c := keycloakHandlerConfig{
 		keycloakHostname:    "keycloak.example.com",
-		keycloakPort:       8443,
-		keycloakRealm:      "myrealm",
+		keycloakPort:        8443,
+		keycloakRealm:       "myrealm",
 		userinfoEndpointURL: "https://keycloak.example.com:8443/realms/myrealm/protocol/openid-connect/userinfo",
 	}
 	assert.Equal(t, "https://keycloak.example.com:8443/realms/myrealm/protocol/openid-connect/userinfo",
@@ -160,11 +167,11 @@ func TestUserinfoEndpoint(t *testing.T) {
 func TestParseUsernameFromUserBindDN(t *testing.T) {
 	baseDN := "cn=users,dc=example,dc=com"
 	tests := []struct {
-		name      string
-		bindDN    string
-		baseDN    string
-		wantUser  string
-		wantOK    bool
+		name     string
+		bindDN   string
+		baseDN   string
+		wantUser string
+		wantOK   bool
 	}{
 		{"valid simple", "cn=johndoe,cn=users,dc=example,dc=com", baseDN, "johndoe", true},
 		{"valid with hyphen", "cn=mary-jane,cn=users,dc=example,dc=com", baseDN, "mary-jane", true},
@@ -212,7 +219,7 @@ func TestPasswordGrantSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := passwordGrant(server.URL, "ldap-client", "secret", "testuser", "testpass", nil)
+	token, err := passwordGrant(&nopLogger, server.URL, "ldap-client", "secret", "testuser", "testpass", nil)
 	require.NoError(t, err)
 	assert.NotNil(t, token)
 	assert.Equal(t, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9", token.AccessToken)
@@ -225,7 +232,7 @@ func TestPasswordGrantInvalidCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := passwordGrant(server.URL, "ldap-client", "secret", "baduser", "badpass", nil)
+	token, err := passwordGrant(&nopLogger, server.URL, "ldap-client", "secret", "baduser", "badpass", nil)
 	assert.Error(t, err)
 	assert.Nil(t, token)
 }
@@ -238,7 +245,7 @@ func TestPasswordGrantInvalidJSON(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := passwordGrant(server.URL, "ldap-client", "secret", "u", "p", nil)
+	token, err := passwordGrant(&nopLogger, server.URL, "ldap-client", "secret", "u", "p", nil)
 	assert.Error(t, err)
 	assert.Nil(t, token)
 }
@@ -426,7 +433,7 @@ func TestUnexpected(t *testing.T) {
 
 func TestGetenv(t *testing.T) {
 	t.Setenv("TEST_GETENV_KEY", "test-value")
-	assert.Equal(t, "test-value", getenv("TEST_GETENV_KEY"))
+	assert.Equal(t, "test-value", getenv(&nopLogger, "TEST_GETENV_KEY"))
 }
 
 func TestClientCredentialsGrantSuccess(t *testing.T) {
@@ -442,7 +449,7 @@ func TestClientCredentialsGrantSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := clientCredentialsGrant(server.URL, "client", "secret", nil)
+	token, err := clientCredentialsGrant(&nopLogger, server.URL, "client", "secret", nil)
 	require.NoError(t, err)
 	assert.NotNil(t, token)
 	assert.True(t, token.Valid())
@@ -454,7 +461,7 @@ func TestClientCredentialsGrantInvalidCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := clientCredentialsGrant(server.URL, "client", "secret", nil)
+	token, err := clientCredentialsGrant(&nopLogger, server.URL, "client", "secret", nil)
 	assert.Error(t, err)
 	assert.Nil(t, token)
 }
@@ -478,11 +485,11 @@ func TestCheckSearchRequestRootDSE(t *testing.T) {
 
 func TestCheckSearchRequestUsersWithPrefix(t *testing.T) {
 	req := ldap.SearchRequest{
-		BaseDN:       "cn=users,dc=example,dc=com",
-		Scope:        ldap.ScopeWholeSubtree,
-		Filter:       "(&(objectClass=user)(|(sAMAccountName=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
-		Attributes:   attributes9,
-		Controls:     []ldap.Control{ldap.NewControlPaging(100)},
+		BaseDN:     "cn=users,dc=example,dc=com",
+		Scope:      ldap.ScopeWholeSubtree,
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
+		Attributes: attributes9,
+		Controls:   []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	prefix, ok := checkSearchRequest(req, "cn=users,dc=example,dc=com", ldap.ScopeWholeSubtree, filterUsersWithPrefix, attributes9, controls1)
 	assert.True(t, ok)
@@ -657,7 +664,7 @@ func TestSearchUsersWithPrefix(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=user)(|(sAMAccountName=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -690,7 +697,7 @@ func TestSearchGroups(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=group)(|(sAMAccountName=ad*)(cn=ad*)))",
+		Filter:     "(&(objectClass=group)(|(sAMAccountName=ad*)(cn=ad*)))",
 		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -702,11 +709,11 @@ func TestSearchGroups(t *testing.T) {
 
 func TestSearchUserBoundUserinfo(t *testing.T) {
 	userinfoResp := map[string]interface{}{
-		"sub":               "sub-id",
+		"sub":                "sub-id",
 		"preferred_username": "alice",
-		"given_name":        "Alice",
-		"family_name":       "A",
-		"email":             "alice@example.com",
+		"given_name":         "Alice",
+		"family_name":        "A",
+		"email":              "alice@example.com",
 	}
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
@@ -1074,7 +1081,7 @@ func TestSearchGroupsKeycloakGetError(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=group)(|(sAMAccountName=x*)(cn=x*)))",
+		Filter:     "(&(objectClass=group)(|(sAMAccountName=x*)(cn=x*)))",
 		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1167,7 +1174,7 @@ func TestSessionRefreshTokenStillValid(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	boundDN := "cn=svc,cn=bind,dc=example,dc=com"
 	h := &keycloakHandler{
-		config:  config,
+		config: config,
 		sessions: map[string]*session{"default": {
 			boundDN: &boundDN,
 			token:   &oauth2.Token{AccessToken: "valid", Expiry: time.Now().Add(time.Hour)},
@@ -1181,7 +1188,7 @@ func TestSessionRefreshIsUserBound(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	boundDN := "cn=alice,cn=users,dc=example,dc=com"
 	h := &keycloakHandler{
-		config:  config,
+		config: config,
 		sessions: map[string]*session{"default": {
 			boundDN:     &boundDN,
 			token:       &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)},
@@ -1204,7 +1211,7 @@ func TestClientCredentialsGrantInvalidTokenResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := clientCredentialsGrant(server.URL, "client", "secret", nil)
+	token, err := clientCredentialsGrant(&nopLogger, server.URL, "client", "secret", nil)
 	assert.Error(t, err)
 	assert.Nil(t, token)
 }
@@ -1394,7 +1401,7 @@ func TestUserBoundSearchWithBaseDNBoundDNReturnsEntry(t *testing.T) {
 func TestCheckSessionBoundDNNil(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := &keycloakHandler{
-		config:  config,
+		config:   config,
 		sessions: map[string]*session{"default": {}}, // boundDN is nil
 	}
 	err := h.checkSession(h.getSession(nil), "cn=alice,cn=users,dc=example,dc=com", false, config.tokenEndpoint())
@@ -1449,7 +1456,7 @@ func TestSearchUsersWithPrefixNoMatch(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=user)(|(sAMAccountName=z*)(sn=z*)(givenName=z*)(cn=z*)(displayname=z*)(userPrincipalName=z*)))",
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=z*)(sn=z*)(givenName=z*)(cn=z*)(displayname=z*)(userPrincipalName=z*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1484,7 +1491,7 @@ func TestSearchUsersWithUserPrincipalNamePrefix(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=user)(|(sAMAccountName=alice@*)(sn=alice@*)(givenName=alice@*)(cn=alice@*)(displayname=alice@*)(userPrincipalName=alice@*)))",
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=alice@*)(sn=alice@*)(givenName=alice@*)(cn=alice@*)(displayname=alice@*)(userPrincipalName=alice@*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1517,7 +1524,7 @@ func TestSearchGroupsPrefixNoMatch(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=group)(|(sAMAccountName=z*)(cn=z*)))",
+		Filter:     "(&(objectClass=group)(|(sAMAccountName=z*)(cn=z*)))",
 		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1606,7 +1613,7 @@ func TestPasswordGrantEmptyAccessToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	token, err := passwordGrant(server.URL, "ldap-client", "secret", "u", "p", nil)
+	token, err := passwordGrant(&nopLogger, server.URL, "ldap-client", "secret", "u", "p", nil)
 	assert.Error(t, err)
 	assert.Nil(t, token)
 }
@@ -1729,7 +1736,7 @@ func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=user)(|(sAMAccountName=AL*)(sn=AL*)(givenName=AL*)(cn=AL*)(displayname=AL*)(userPrincipalName=AL*)))",
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=AL*)(sn=AL*)(givenName=AL*)(cn=AL*)(displayname=AL*)(userPrincipalName=AL*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1750,7 +1757,7 @@ func TestGetSessionConnNotInMapReturnsNil(t *testing.T) {
 	conn, connOther := net.Pipe()
 	defer conn.Close()
 	defer connOther.Close()
-	
+
 	// After fix: getSession should return nil for unknown connections
 	got := h.getSession(conn)
 	assert.Nil(t, got, "Unknown connection should return nil session")
@@ -1767,7 +1774,7 @@ func TestCloseConnNotInMapGracefullyHandles(t *testing.T) {
 	conn, connOther := net.Pipe()
 	defer conn.Close()
 	defer connOther.Close()
-	
+
 	// After fix: Close should handle unknown connections gracefully
 	err := h.Close(boundDN, conn)
 	// It's OK to return nil (connection wasn't tracked) or an error (no session)
@@ -1865,26 +1872,26 @@ func TestBug1_ConnToKeyNotInitialized(t *testing.T) {
 
 	h := NewKeycloakHandler().(*keycloakHandler)
 	require.NotNil(t, h.config)
-	
+
 	// BUG: connToKey is not initialized
 	if h.connToKey == nil {
 		t.Log("BUG CONFIRMED: connToKey is nil after NewKeycloakHandler")
 	} else {
 		t.Log("Bug might be fixed - connToKey is initialized")
 	}
-	
+
 	// This will panic if connToKey is nil when trying to add to it
 	conn1, conn2 := net.Pipe()
 	defer conn1.Close()
 	defer conn2.Close()
-	
+
 	// Test will panic here if bug exists, but we'll catch it
 	defer func() {
 		if r := recover(); r != nil {
 			t.Logf("BUG CONFIRMED: Panic when using nil connToKey: %v", r)
 		}
 	}()
-	
+
 	h.getOrCreateSession(conn1)
 }
 
@@ -1892,7 +1899,7 @@ func TestBug1_ConnToKeyNotInitialized(t *testing.T) {
 func TestBug2_SessionCleanupMultipleConnections(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	// Create multiple connections that share the same session
 	conn1, conn1b := net.Pipe()
 	conn2, conn2b := net.Pipe()
@@ -1900,24 +1907,24 @@ func TestBug2_SessionCleanupMultipleConnections(t *testing.T) {
 	defer conn1b.Close()
 	defer conn2.Close()
 	defer conn2b.Close()
-	
+
 	// Create sessions for both connections
 	sess1 := h.getOrCreateSession(conn1)
 	sess2 := h.getOrCreateSession(conn2)
-	
+
 	// Make both sessions expired
 	sess1.lastActivity = time.Now().Add(-sessionTTL - time.Minute)
 	sess2.lastActivity = time.Now().Add(-sessionTTL - time.Minute)
-	
+
 	// Store the number of connections before cleanup
 	_ = len(h.connToKey) // connsBefore - for future use if needed
-	
+
 	// Trigger cleanup by creating a new session
 	conn3, conn3b := net.Pipe()
 	defer conn3.Close()
 	defer conn3b.Close()
 	h.getOrCreateSession(conn3)
-	
+
 	// BUG: The cleanup only removes one connection per session key due to break statement
 	// If there were multiple connections with same session, some will leak
 	if len(h.connToKey) > 1 {
@@ -1929,20 +1936,20 @@ func TestBug2_SessionCleanupMultipleConnections(t *testing.T) {
 func TestBug3_SessionKeyInconsistency(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	conn1, conn2 := net.Pipe()
 	defer conn1.Close()
 	defer conn2.Close()
-	
+
 	// Get the key before the session is created
 	keyBefore := h.sessionKey(conn1)
-	
+
 	// Create the session
 	h.getOrCreateSession(conn1)
-	
+
 	// Get the key after the session is created
 	keyAfter := h.sessionKey(conn1)
-	
+
 	// After fix: keyBefore should be empty string for unknown connections,
 	// keyAfter should be the assigned unique key
 	if keyBefore == "" && keyAfter != "" && keyAfter != "default" {
@@ -1950,22 +1957,22 @@ func TestBug3_SessionKeyInconsistency(t *testing.T) {
 	} else {
 		t.Logf("sessionKey behavior - before: %q, after: %q", keyBefore, keyAfter)
 	}
-	
+
 	// Verify the session is stored under the unique key
 	h.sessionsMu.RLock()
 	_, hasUniqueKey := h.sessions[keyAfter]
 	h.sessionsMu.RUnlock()
-	
+
 	assert.True(t, hasUniqueKey, "Session should be stored under unique key")
 }
 
 // TestBug4_EmptyUsernameAccepted tests that parseUsernameFromUserBindDN accepts empty usernames
 func TestBug4_EmptyUsernameAccepted(t *testing.T) {
 	baseDN := "cn=users,dc=example,dc=com"
-	
+
 	// BUG: Empty username should be rejected but is accepted
 	username, ok := parseUsernameFromUserBindDN("cn=,cn=users,dc=example,dc=com", baseDN)
-	
+
 	if ok && username == "" {
 		t.Log("BUG CONFIRMED: empty username accepted as valid")
 		// This is the bug we expect to exist
@@ -2003,12 +2010,12 @@ func TestBug5_FirstNamePrefixNotChecked(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: "(&(objectClass=user)(|(sAMAccountName=Bob*)(sn=Bob*)(givenName=Bob*)(cn=Bob*)(displayname=Bob*)(userPrincipalName=Bob*)))",
+		Filter:     "(&(objectClass=user)(|(sAMAccountName=Bob*)(sn=Bob*)(givenName=Bob*)(cn=Bob*)(displayname=Bob*)(userPrincipalName=Bob*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	require.NoError(t, err)
-	
+
 	// BUG: The filter should match givenName (FirstName) but the code only checks Username and LastName
 	if len(res.Entries) == 0 {
 		t.Log("BUG CONFIRMED: FirstName prefix not checked, user with matching FirstName not returned")
@@ -2035,7 +2042,7 @@ func TestBug6_InitErrorReturnsEmptyHandler(t *testing.T) {
 	}()
 
 	h := NewKeycloakHandler()
-	
+
 	// After fix: should return nil instead of empty handler with nil config
 	if h == nil {
 		t.Log("Bug FIXED: Handler correctly returns nil on initialization error")
@@ -2059,9 +2066,9 @@ func TestBug7_OAuth2NoContextTimeout(t *testing.T) {
 
 	// After fix: clientCredentialsGrant should timeout after httpClientTimeout (30s)
 	start := time.Now()
-	_, err := clientCredentialsGrant(hangingServer.URL, "client", "secret", nil)
+	_, err := clientCredentialsGrant(&nopLogger, hangingServer.URL, "client", "secret", nil)
 	elapsed := time.Since(start)
-	
+
 	if err != nil && elapsed < 35*time.Second {
 		t.Logf("Bug FIXED: Request timed out after %v with error: %v", elapsed, err)
 	} else {
@@ -2073,20 +2080,20 @@ func TestBug7_OAuth2NoContextTimeout(t *testing.T) {
 func TestBug3_SessionKeyWrongMapping(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	conn1, conn2 := net.Pipe()
 	defer conn1.Close()
 	defer conn2.Close()
-	
+
 	// Create session with a connection
 	sess := h.getOrCreateSession(conn1)
 	boundDN := "cn=test,cn=bind,dc=example,dc=com"
 	sess.boundDN = &boundDN
 	sess.token = &oauth2.Token{AccessToken: "test-token"}
-	
+
 	// Try to retrieve the session
 	retrievedSess := h.getSession(conn1)
-	
+
 	// BUG: If the session is stored under a unique key but retrieved as "default",
 	// we won't get the same session back
 	if retrievedSess != sess {
@@ -2098,27 +2105,27 @@ func TestBug3_SessionKeyWrongMapping(t *testing.T) {
 func TestBug8_SessionCleanupMemoryLeak(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	// Create some expired sessions
 	conn1, conn1b := net.Pipe()
 	defer conn1.Close()
 	defer conn1b.Close()
-	
+
 	sess1 := h.getOrCreateSession(conn1)
 	sess1.lastActivity = time.Now().Add(-sessionTTL - time.Hour)
-	
+
 	// Close the connection but don't call Close()
 	conn1.Close()
 	conn1b.Close()
-	
+
 	// Wait a long time without creating new sessions
 	// BUG: Expired sessions are never cleaned up unless getOrCreateSession is called
 	time.Sleep(10 * time.Millisecond)
-	
+
 	h.sessionsMu.RLock()
 	numSessions := len(h.sessions)
 	h.sessionsMu.RUnlock()
-	
+
 	if numSessions > 0 {
 		t.Logf("BUG CONFIRMED: %d expired sessions still in memory (should be cleaned up by background goroutine)", numSessions)
 	}
@@ -2136,7 +2143,7 @@ func TestBug9_PasswordGrantGenericError(t *testing.T) {
 		{"server_error", http.StatusInternalServerError, `{"error":"server_error"}`},
 		{"bad_gateway", http.StatusBadGateway, ""},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2146,10 +2153,10 @@ func TestBug9_PasswordGrantGenericError(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			
-			_, err := passwordGrant(server.URL, "client", "secret", "user", "pass", nil)
+
+			_, err := passwordGrant(&nopLogger, server.URL, "client", "secret", "user", "pass", nil)
 			require.Error(t, err)
-			
+
 			// BUG: All errors return the same generic "invalid credentials" message
 			if err.Error() == "invalid credentials" {
 				t.Logf("BUG CONFIRMED: %d status returns generic 'invalid credentials' instead of specific error", tc.statusCode)
@@ -2170,17 +2177,17 @@ func TestBug10_ResponseBodyNoLimit(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	
+
 	config := makeHandlerConfigFromURL(t, server.URL)
 	config.userinfoEndpointURL = server.URL + "/userinfo"
 	h := makeHandlerWithConfig(config)
-	
+
 	sess := &session{token: &oauth2.Token{AccessToken: "test"}}
-	
+
 	// This could cause OOM with a malicious server
 	// BUG: No size limit on response bodies
 	_, err := h.keycloakUserinfo(sess)
-	
+
 	if err != nil {
 		t.Logf("Request failed (expected with huge response): %v", err)
 	} else {
@@ -2198,7 +2205,7 @@ func TestBug11_VsphereDomainValidation(t *testing.T) {
 		".",
 		"example..com",
 	}
-	
+
 	for _, invalidDomain := range testCases {
 		t.Run("invalid_"+invalidDomain, func(t *testing.T) {
 			os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
@@ -2211,9 +2218,9 @@ func TestBug11_VsphereDomainValidation(t *testing.T) {
 				os.Unsetenv("KEYCLOAK_REALM")
 				os.Unsetenv("LDAP_DOMAIN")
 			}()
-			
-			config, err := newKeycloakHandlerConfig()
-			
+
+			config, err := newKeycloakHandlerConfig(&nopLogger)
+
 			// BUG: Invalid domains are accepted without validation
 			if err == nil && config != nil {
 				t.Logf("BUG CONFIRMED: Invalid domain %q was accepted", invalidDomain)
@@ -2226,24 +2233,24 @@ func TestBug11_VsphereDomainValidation(t *testing.T) {
 func TestBug12_MagicStringDefault(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	// Create a session with nil connection (uses "default" key)
 	sess1 := h.getOrCreateSession(nil)
 	sess1.token = &oauth2.Token{AccessToken: "test1"}
-	
+
 	// Get the key for nil connection
 	key := h.sessionKey(nil)
-	
+
 	// BUG: Uses magic string "default" instead of a constant
 	if key == "default" {
 		t.Log("BUG CONFIRMED: Magic string 'default' used instead of constant")
 	}
-	
+
 	// This could cause collisions if "default" is used elsewhere
 	h.sessionsMu.Lock()
 	h.sessions["default"] = &session{token: &oauth2.Token{AccessToken: "test2"}}
 	h.sessionsMu.Unlock()
-	
+
 	sess2 := h.getSession(nil)
 	if sess1 != sess2 || sess2.token.AccessToken != sess1.token.AccessToken {
 		t.Log("Magic string collision detected")
@@ -2255,16 +2262,16 @@ func TestBug13_SHA1Usage(t *testing.T) {
 	// Generate two SIDs
 	sid1 := sid("user-id-123", "example.com")
 	sid2 := sid("user-id-456", "example.com")
-	
+
 	// SHA1 generates 20 bytes
 	// The SID format is: 1 byte revision + 1 byte subauth count + 6 bytes authority + N*4 bytes subauths
 	// In this implementation: 1 + 1 + 6 + 5*4 = 28 bytes
-	
+
 	if len(sid1) == 28 && len(sid2) == 28 {
 		t.Log("BUG CONFIRMED: SHA1 is used for SID generation (cryptographically broken)")
 		t.Log("Consider using SHA256 instead")
 	}
-	
+
 	// Verify they produce different SIDs
 	if string(sid1) == string(sid2) {
 		t.Error("SID collision detected!")
@@ -2275,21 +2282,21 @@ func TestBug13_SHA1Usage(t *testing.T) {
 func TestBug14_ClientSecretStoredInMemory(t *testing.T) {
 	sess := &session{}
 	clientSecret := "super-secret-password-123"
-	
+
 	tokenEndpoint := "http://example.com/token"
 	httpClient := &http.Client{Timeout: 1 * time.Second}
-	
+
 	// Simulate opening a session (would normally call Keycloak)
 	sess.clientID = "test-client"
 	sess.clientSecret = clientSecret
 	sess.isUserBound = false
-	
+
 	// BUG: Client secret is stored in plaintext in memory
 	if sess.clientSecret == clientSecret {
 		t.Log("BUG CONFIRMED: Client secret stored in plaintext in session struct")
 		t.Logf("Secret visible in memory: %s", sess.clientSecret)
 	}
-	
+
 	// In a real attack, memory dumps or debuggers could extract this
 	_ = tokenEndpoint
 	_ = httpClient
@@ -2304,19 +2311,19 @@ func TestBug15_NoContextPropagation(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"sub": "test", "preferred_username": "test"})
 	}))
 	defer slowServer.Close()
-	
+
 	config := makeHandlerConfigFromURL(t, slowServer.URL)
 	config.userinfoEndpointURL = slowServer.URL + "/userinfo"
 	h := makeHandlerWithConfig(config)
-	
+
 	sess := &session{token: &oauth2.Token{AccessToken: "test"}}
-	
+
 	// BUG: Can't pass context to cancel the request early
 	// keycloakUserinfo doesn't accept context parameter
 	start := time.Now()
 	_, err := h.keycloakUserinfo(sess)
 	elapsed := time.Since(start)
-	
+
 	if err == nil && elapsed > 1*time.Second {
 		t.Logf("BUG CONFIRMED: keycloakUserinfo doesn't accept context, can't cancel request (took %v)", elapsed)
 	}
@@ -2326,10 +2333,10 @@ func TestBug15_NoContextPropagation(t *testing.T) {
 func TestBug16_HardcodedTimeouts(t *testing.T) {
 	// The httpClientTimeout constant is hardcoded to 30 seconds
 	// There's no way to configure it via environment variable
-	
+
 	os.Setenv("HTTP_CLIENT_TIMEOUT", "5s")
 	defer os.Unsetenv("HTTP_CLIENT_TIMEOUT")
-	
+
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -2340,9 +2347,9 @@ func TestBug16_HardcodedTimeouts(t *testing.T) {
 		os.Unsetenv("KEYCLOAK_REALM")
 		os.Unsetenv("LDAP_DOMAIN")
 	}()
-	
+
 	h := NewKeycloakHandler().(*keycloakHandler)
-	
+
 	// BUG: httpClient always uses hardcoded 30s timeout, ignoring environment variable
 	if h.httpClient.Timeout == 30*time.Second {
 		t.Log("BUG CONFIRMED: Timeout is hardcoded to 30s, not configurable")
@@ -2353,7 +2360,7 @@ func TestBug16_HardcodedTimeouts(t *testing.T) {
 func TestBug17_SessionCleanupBreaksEarly(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
-	
+
 	// Create multiple connections mapping to the same session key
 	conn1, conn1b := net.Pipe()
 	conn2, conn2b := net.Pipe()
@@ -2361,31 +2368,293 @@ func TestBug17_SessionCleanupBreaksEarly(t *testing.T) {
 	defer conn1b.Close()
 	defer conn2.Close()
 	defer conn2b.Close()
-	
+
 	sess := h.getOrCreateSession(conn1)
 	key1 := h.sessionKey(conn1)
-	
+
 	// Manually add another connection with the same session key
 	h.sessionsMu.Lock()
 	h.connToKey[conn2] = key1
 	h.sessionsMu.Unlock()
-	
+
 	// Make session expired
 	sess.lastActivity = time.Now().Add(-sessionTTL - time.Minute)
-	
+
 	connsBefore := len(h.connToKey)
-	
+
 	// Trigger cleanup
 	conn3, conn3b := net.Pipe()
 	defer conn3.Close()
 	defer conn3b.Close()
 	h.getOrCreateSession(conn3)
-	
+
 	connsAfter := len(h.connToKey)
-	
+
 	// BUG: The cleanup loop has a break that only removes the first connection per session
 	// If multiple connections map to the same session, they won't all be cleaned up
 	if connsBefore > 1 && connsAfter > 1 {
 		t.Logf("BUG CONFIRMED: Cleanup didn't remove all connections for expired session (before: %d, after: %d)", connsBefore, connsAfter)
 	}
+}
+
+func TestGroupPathToCN(t *testing.T) {
+	tests := []struct {
+		path   string
+		expect string
+	}{
+		{"/admins", "admins"},
+		{"/parent/child", "child"},
+		{"", ""},
+		{"noslash", "noslash"},
+		{" /a ", "a"},
+		{"/single", "single"},
+		{"/a/b/c", "c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := groupPathToCN(tt.path)
+			assert.Equal(t, tt.expect, got)
+		})
+	}
+}
+
+func TestRealmRolesFromUserinfo(t *testing.T) {
+	t.Run("nil_info_returns_nil", func(t *testing.T) {
+		got := realmRolesFromUserinfo(nil)
+		assert.Nil(t, got)
+	})
+	t.Run("empty_info_returns_nil", func(t *testing.T) {
+		got := realmRolesFromUserinfo(&userinfoResponse{})
+		assert.Nil(t, got)
+	})
+	t.Run("realm_roles_takes_precedence", func(t *testing.T) {
+		var info userinfoResponse
+		err := json.Unmarshal([]byte(`{"realm_roles":["r1","r2"],"realm_access":{"roles":["other"]}}`), &info)
+		require.NoError(t, err)
+		got := realmRolesFromUserinfo(&info)
+		assert.Equal(t, []string{"r1", "r2"}, got)
+	})
+	t.Run("realm_access_roles_used_when_realm_roles_empty", func(t *testing.T) {
+		var info userinfoResponse
+		err := json.Unmarshal([]byte(`{"realm_access":{"roles":["admin","user"]}}`), &info)
+		require.NoError(t, err)
+		got := realmRolesFromUserinfo(&info)
+		assert.Equal(t, []string{"admin", "user"}, got)
+	})
+	t.Run("nil_realm_access_returns_nil", func(t *testing.T) {
+		info := &userinfoResponse{} // Roles not set
+		got := realmRolesFromUserinfo(info)
+		assert.Nil(t, got)
+	})
+	t.Run("empty_realm_access_roles_returns_nil", func(t *testing.T) {
+		var info userinfoResponse
+		err := json.Unmarshal([]byte(`{"realm_access":{"roles":[]}}`), &info)
+		require.NoError(t, err)
+		got := realmRolesFromUserinfo(&info)
+		assert.Nil(t, got)
+	})
+	t.Run("realm_and_client_roles_combined_client_prefix", func(t *testing.T) {
+		var info userinfoResponse
+		err := json.Unmarshal([]byte(`{
+			"realm_access": {"roles": ["admin", "user"]},
+			"resource_access": {
+				"jellyfin": {"roles": ["jellyfin-users", "jellyfin-admins"]},
+				"other-client": {"roles": ["viewer"]}
+			}
+		}`), &info)
+		require.NoError(t, err)
+		got := realmRolesFromUserinfo(&info)
+		// Realm roles first (order from realm_access), then client roles with "clientId:roleName"
+		assert.Contains(t, got, "admin")
+		assert.Contains(t, got, "user")
+		assert.Contains(t, got, "jellyfin:jellyfin-users")
+		assert.Contains(t, got, "jellyfin:jellyfin-admins")
+		assert.Contains(t, got, "other-client:viewer")
+		assert.Len(t, got, 5)
+	})
+}
+
+func TestSearchUserBoundUserinfoWithGroupsAndRoles(t *testing.T) {
+	userinfoResp := map[string]interface{}{
+		"sub":                "sub-id",
+		"preferred_username": "alice",
+		"given_name":         "Alice",
+		"family_name":        "A",
+		"email":              "alice@example.com",
+		"groups":             []string{"/admins", "/parent/developers"},
+		"realm_access":       map[string]interface{}{"roles": []string{"user", "admin"}},
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(userinfoResp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=alice,cn=users,dc=example,dc=com", "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1)
+	entry := res.Entries[0]
+
+	memberOf := entry.GetAttributeValues("memberOf")
+	require.NotEmpty(t, memberOf, "memberOf should contain group and role DNs")
+	assert.Contains(t, memberOf, "cn=admins,cn=groups,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=developers,cn=groups,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=user,ou=roles,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=admin,ou=roles,dc=example,dc=com")
+	assert.Len(t, memberOf, 4)
+}
+
+func TestSearchUserBoundUserinfoWithRolesOnly(t *testing.T) {
+	userinfoResp := map[string]interface{}{
+		"sub":                "sub-id",
+		"preferred_username": "bob",
+		"realm_access":       map[string]interface{}{"roles": []string{"viewer"}},
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(userinfoResp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=bob,cn=users,dc=example,dc=com", "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Entries, 1)
+	entry := res.Entries[0]
+
+	memberOf := entry.GetAttributeValues("memberOf")
+	assert.Contains(t, memberOf, "cn=viewer,ou=roles,dc=example,dc=com")
+}
+
+func TestSearchUserBoundUserinfoWithGroupsOnly(t *testing.T) {
+	userinfoResp := map[string]interface{}{
+		"sub":                "sub-id",
+		"preferred_username": "charlie",
+		"groups":             []string{"/team-a"},
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(userinfoResp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=charlie,cn=users,dc=example,dc=com", "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Entries, 1)
+	entry := res.Entries[0]
+
+	memberOf := entry.GetAttributeValues("memberOf")
+	assert.Equal(t, []string{"cn=team-a,cn=groups,dc=example,dc=com"}, memberOf)
+}
+
+// TestSearchUserBoundMemberOfJellyfinStyle verifies that a user with roles jellyfin-users and jellyfin-admins
+// gets memberOf DNs under ou=roles,dc=societycell,dc=local so that an LDAP filter like
+// (|(memberOf=cn=jellyfin-users,ou=roles,dc=societycell,dc=local)(memberOf=cn=jellyfin-admins,ou=roles,dc=societycell,dc=local))
+// matches (e.g. for Jellyfin or similar apps that gate access by role).
+func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
+	userinfoResp := map[string]interface{}{
+		"sub":                "sub-id",
+		"preferred_username": "test",
+		"realm_access":       map[string]interface{}{"roles": []string{"jellyfin-users", "jellyfin-admins"}},
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(userinfoResp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	config.ldapDomain = "societycell.local"
+	h := makeHandlerWithConfig(config)
+
+	boundDN := "cn=test,cn=users,dc=societycell,dc=local"
+	code, _ := h.Bind(boundDN, "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=societycell,dc=local", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.Len(t, res.Entries, 1)
+	entry := res.Entries[0]
+
+	memberOf := entry.GetAttributeValues("memberOf")
+	require.NotEmpty(t, memberOf, "memberOf required for filter (|(memberOf=cn=jellyfin-users,...)(memberOf=cn=jellyfin-admins,...))")
+	jellyfinUsersDN := "cn=jellyfin-users,ou=roles,dc=societycell,dc=local"
+	jellyfinAdminsDN := "cn=jellyfin-admins,ou=roles,dc=societycell,dc=local"
+	assert.Contains(t, memberOf, jellyfinUsersDN, "entry must have memberOf for jellyfin-users so Jellyfin-style filter matches")
+	assert.Contains(t, memberOf, jellyfinAdminsDN, "entry must have memberOf for jellyfin-admins so Jellyfin-style filter matches")
 }

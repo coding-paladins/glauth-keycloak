@@ -1,39 +1,20 @@
 {
-  "name": "societycell",
+  "name": "glauth-keycloak",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "runArgs": [
-    "--network=host"
-  ],
-  "mounts": [
-    "source=${localEnv:HOME}/.ssh,target=/tmp/host-ssh,type=bind,readonly"
-  ],
-  "features": {
-    "ghcr.io/eitsupi/devcontainer-features/go-task:latest": {}
-  },
   "containerEnv": {
-    "KUBECONFIG": "/workspaces/societycell/kubeconfig"
+    "KUBECONFIG": "/workspace/kubeconfig"
   },
   "customizations": {
     "vscode": {
       "extensions": [
-        "bierner.markdown-preview-github-styles",
-        "DavidAnson.vscode-markdownlint",
-        "dhoeric.ansible-vault",
-        "eamodio.gitlens",
-        "esbenp.prettier-vscode",
-        "mhutchie.git-graph",
-        "ms-python.black-formatter",
-        "ms-python.flake8",
-        "oderwat.indent-rainbow",
-        "redhat.ansible",
-        "tamasfe.even-better-toml",
-        "yzhang.markdown-all-in-one",
-        "ms-azuretools.vscode-docker"
+        "golang.go",
+        "ms-kubernetes-tools.vscode-kubernetes-tools"
       ]
     }
   },
-  "postCreateCommand": "bash .devcontainer/postCreateCommand.sh"
+  "forwardPorts": [8080, 8081],
+  "postCreateCommand": ".devcontainer/postCreateCommand.sh"
 }

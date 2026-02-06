@@ -84,3 +84,4 @@ Desktop.ini
 .directory
 .Trash-*
 .go-install/
+kubeconfig
