@@ -1,11 +1,17 @@
+// Package main provides a GLAuth LDAP handler that authenticates and authorizes
+// against Keycloak via OAuth 2.0 (client credentials and resource owner password grants).
 package main
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +19,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/glauth/glauth/v2/pkg/config"
@@ -26,20 +35,42 @@ import (
 
 var logger = zerolog.New(os.Stderr).With().Logger()
 
+var connectionKeyCounter uint64
+
+const sessionTTL = 30 * time.Minute
+
+const defaultSessionKey = "default"
+
+const maxResponseBodySize = 10 * 1024 * 1024 // 10MB limit for response bodies
+
+var allowNilConnectionForTests bool
+
+// userAccountControl value for normal, enabled user (Windows AD UF_NORMAL_ACCOUNT).
+const userAccountControlNormal = "512"
+
 type keycloakHandler struct {
 	config          *keycloakHandlerConfig
 	baseDNUsers     string
 	baseDNGroups    string
 	baseDNBindUsers string
 	restClient      *resty.Client
-	session         *session
+	httpClient      *http.Client
+	sessions        map[string]*session
+	connToKey       map[net.Conn]string // maps connection to unique session key (avoids NAT collision)
+	sessionsMu      sync.RWMutex
 }
 
 type keycloakHandlerConfig struct {
-	keycloakHostname string
-	keycloakPort     int
-	keycloakRealm    string
-	vsphereDomain    string
+	keycloakHostname           string
+	keycloakPort               int
+	keycloakRealm              string
+	keycloakScheme             string // "https" in production; tests may use "http"
+	ldapDomain                 string
+	ldapClientID              string
+	ldapClientSecret           string
+	userinfoEndpointURL        string
+	keycloakCAFile             string   // optional PEM file for custom CA
+	keycloakInsecureSkipVerify bool     // dev/test only: skip TLS verify
 }
 
 type session struct {
@@ -47,57 +78,181 @@ type session struct {
 	clientSecret string
 	boundDN      *string
 	token        *oauth2.Token
+	isUserBound  bool
+	lastActivity time.Time
+}
+
+func (h *keycloakHandler) sessionKey(conn net.Conn) string {
+	if conn == nil {
+		return defaultSessionKey
+	}
+	h.sessionsMu.RLock()
+	defer h.sessionsMu.RUnlock()
+	if h.connToKey != nil {
+		if k, ok := h.connToKey[conn]; ok && k != "" {
+			return k
+		}
+	}
+	// For unknown connections, return a placeholder that won't match any real session
+	// This prevents accidentally using "default" when connection-specific sessions exist
+	return ""
+}
+
+func (h *keycloakHandler) getSession(conn net.Conn) *session {
+	h.sessionsMu.RLock()
+	defer h.sessionsMu.RUnlock()
+	if h.sessions == nil {
+		return nil
+	}
+	key := h.sessionKeyLocked(conn)
+	if key == "" {
+		return nil
+	}
+	return h.sessions[key]
+}
+
+// sessionKeyLocked returns the session key for a connection without acquiring the lock.
+// Must be called with sessionsMu held.
+func (h *keycloakHandler) sessionKeyLocked(conn net.Conn) string {
+	if conn == nil {
+		return defaultSessionKey
+	}
+	if h.connToKey != nil {
+		if k, ok := h.connToKey[conn]; ok && k != "" {
+			return k
+		}
+	}
+	// Return empty string for unknown connections
+	return ""
+}
+
+func (h *keycloakHandler) getOrCreateSession(conn net.Conn) *session {
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+	if h.sessions == nil {
+		h.sessions = make(map[string]*session)
+	}
+	// lazy cleanup of stale sessions (e.g. client disconnected without Close)
+	now := time.Now()
+	var staleKeys []string
+	for k, s := range h.sessions {
+		if !s.lastActivity.IsZero() && now.Sub(s.lastActivity) > sessionTTL {
+			staleKeys = append(staleKeys, k)
+		}
+	}
+	// Clean up stale sessions and their connections
+	for _, k := range staleKeys {
+		delete(h.sessions, k)
+		if h.connToKey != nil {
+			// Remove all connections that map to this session key
+			for c, id := range h.connToKey {
+				if id == k {
+					delete(h.connToKey, c)
+				}
+			}
+		}
+	}
+	key := defaultSessionKey
+	if conn != nil {
+		if h.connToKey == nil {
+			h.connToKey = make(map[net.Conn]string)
+		}
+		if k, ok := h.connToKey[conn]; ok {
+			key = k
+		} else {
+			key = fmt.Sprintf("conn-%d", atomic.AddUint64(&connectionKeyCounter, 1))
+			h.connToKey[conn] = key
+		}
+	}
+	if h.sessions[key] == nil {
+		h.sessions[key] = &session{}
+	}
+	return h.sessions[key]
 }
 
 type Group struct {
-	Id   string `json:"id"`
+	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
 type User struct {
 	Email     string `json:"email"`
 	FirstName string `json:"firstName"`
-	Id        string `json:"id"`
+	ID        string `json:"id"`
 	LastName  string `json:"lastName"`
 	Username  string `json:"username"`
 }
 
+type userinfoResponse struct {
+	Sub            string `json:"sub"`
+	PreferredName  string `json:"preferred_username"`
+	Email          string `json:"email"`
+	Name           string `json:"name"`
+	GivenName      string `json:"given_name"`
+	FamilyName     string `json:"family_name"`
+	EmailVerified  bool   `json:"email_verified"`
+}
+
 // Handler (Binder)
 
-func (h keycloakHandler) Bind(
+func (h *keycloakHandler) Bind(
 	bindDN string,
 	bindSimplePw string,
 	conn net.Conn,
 ) (ldap.LDAPResultCode, error) {
+	if conn == nil && !allowNilConnectionForTests {
+		return ldap.LDAPResultOperationsError, errors.New("nil connection not allowed")
+	}
 	logger.Debug().
 		Str("bindDN", bindDN).
-		Msg("Bind request")
+		Msg("bind request")
 	if h.config == nil {
 		return ldap.LDAPResultOperationsError,
-			errors.New("misconfiguration")
+			errors.New("misconfiguration: handler config is nil")
 	}
 
-	pre := "cn="
-	suf := "," + h.baseDNBindUsers
-	if !strings.HasPrefix(bindDN, pre) || !strings.HasSuffix(bindDN, suf) {
-		logger.Error().
-			Str("base", h.baseDNBindUsers).
-			Msg("invalid bindDN")
-		return ldap.LDAPResultInvalidCredentials, nil
-	}
+	s := h.getOrCreateSession(conn)
 
-	clientID := strings.TrimPrefix(strings.TrimSuffix(bindDN, suf), pre)
-	clientSecret := bindSimplePw
-	if err := h.session.open(h.config.tokenEndpoint(), clientID,
-		clientSecret, bindDN); err != nil {
-		logger.Error().Err(err).Msg("Bind response")
-		return ldap.LDAPResultInvalidCredentials, nil
-	} else {
+	// Service account bind: cn=<clientId>,cn=bind,<baseDN>
+	preBind := "cn="
+	sufBind := "," + h.baseDNBindUsers
+	if strings.HasPrefix(bindDN, preBind) && strings.HasSuffix(bindDN, sufBind) {
+		clientID := strings.TrimPrefix(strings.TrimSuffix(bindDN, sufBind), preBind)
+		clientSecret := bindSimplePw
+		if err := s.open(h.tokenEndpoint(), clientID,
+			clientSecret, bindDN, h.httpClient); err != nil {
+			logger.Error().Err(err).Msg("bind response")
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
 		logger.Debug().
-			Time("expiry", h.session.token.Expiry).
-			Msg("Bind response")
+			Time("expiry", s.token.Expiry).
+			Msg("bind response (service account)")
 		return ldap.LDAPResultSuccess, nil
 	}
+
+	// User bind: cn=<username>,cn=users,<baseDN> — validate with Keycloak password grant
+	sufUsers := "," + h.baseDNUsers
+	if h.config.ldapClientID != "" && h.config.ldapClientSecret != "" &&
+		strings.HasPrefix(bindDN, preBind) && strings.HasSuffix(bindDN, sufUsers) {
+		username, ok := parseUsernameFromUserBindDN(bindDN, h.baseDNUsers)
+		if !ok {
+			logger.Error().Str("bindDN", bindDN).Msg("invalid user bindDN")
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
+		token, err := passwordGrant(h.tokenEndpoint(),
+			h.config.ldapClientID, h.config.ldapClientSecret,
+			username, bindSimplePw, h.httpClient)
+		if err != nil {
+			logger.Error().Err(err).Str("username", username).Msg("user bind failed")
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
+		s.openUser(bindDN, token)
+		logger.Debug().Str("username", username).Msg("bind response (user)")
+		return ldap.LDAPResultSuccess, nil
+	}
+
+	logger.Error().Str("baseBind", h.baseDNBindUsers).Str("baseUsers", h.baseDNUsers).Msg("invalid bindDN")
+	return ldap.LDAPResultInvalidCredentials, nil
 }
 
 var rootDSEAttributes = []string{
@@ -158,11 +313,16 @@ var controls1 = []string{ldap.ControlTypePaging}
 
 // Handler (Searcher)
 
-func (h keycloakHandler) Search(
+func (h *keycloakHandler) Search(
 	boundDN string,
 	req ldap.SearchRequest,
 	conn net.Conn,
 ) (ldap.ServerSearchResult, error) {
+	if conn == nil && !allowNilConnectionForTests {
+		err := errors.New("nil connection not allowed")
+		logger.Error().Err(err).Msg("search response")
+		return errorSearchResult(), err
+	}
 	scope := ldap.ScopeMap[req.Scope]
 	deferAliases := ldap.DerefMap[req.DerefAliases]
 	c := make([]string, len(req.Controls))
@@ -186,25 +346,30 @@ func (h keycloakHandler) Search(
 		Str("filter", req.Filter).
 		Str("attributes", attributes).
 		Str("controls", controls).
-		Msg("Search request")
+		Msg("search request")
 
-	if err := h.checkSession(boundDN, true); err != nil {
-		logger.Error().Err(err).Msg("Search response")
+	sess := h.getSession(conn)
+	if err := h.checkSession(sess, boundDN, true, h.tokenEndpoint()); err != nil {
+		logger.Error().Err(err).Msg("search response")
 		return errorSearchResult(), err
-	} else if req.DerefAliases != ldap.NeverDerefAliases ||
+	}
+	if sess.isUserBound {
+		return h.userBoundSearchResult(sess, boundDN, req)
+	}
+	if req.DerefAliases != ldap.NeverDerefAliases ||
 		req.SizeLimit != 0 ||
 		req.TimeLimit != 0 ||
 		req.TypesOnly {
 
-		err := unexpected(fmt.Sprintf("DeferAliases: \"%s\", "+
-			"SizeLimit: %d, "+
-			"TimeLimit: %d, "+
-			"TypesOnly: %t",
+		err := unexpected(fmt.Sprintf("deferAliases: \"%s\", "+
+			"sizeLimit: %d, "+
+			"timeLimit: %d, "+
+			"typesOnly: %t",
 			deferAliases,
 			req.SizeLimit,
 			req.TimeLimit,
 			req.TypesOnly))
-		logger.Error().Err(err).Msg("Search response")
+		logger.Error().Err(err).Msg("search response")
 		return errorSearchResult(), err
 	} else if _, ok := checkSearchRequest(
 		req,
@@ -218,7 +383,7 @@ func (h keycloakHandler) Search(
 		logger.Debug().
 			Str("BaseDN", req.BaseDN).
 			Int("entries", len(res.Entries)).
-			Msg("Search response")
+			Msg("search response")
 		return res, nil
 	} else if _, ok := checkSearchRequest(
 		req,
@@ -228,14 +393,14 @@ func (h keycloakHandler) Search(
 		attributes9,
 		controls1); ok {
 
-		if res, err := h.usersSearchResult(""); err != nil {
-			logger.Error().Err(err).Msg("Search response")
+		if res, err := h.usersSearchResult(sess, ""); err != nil {
+			logger.Error().Err(err).Msg("search response")
 			return errorSearchResult(), err
 		} else {
 			logger.Debug().
 				Str("BaseDN", req.BaseDN).
 				Int("entries", len(res.Entries)).
-				Msg("Search response")
+				Msg("search response")
 			return res, nil
 		}
 	} else if prefix, ok := checkSearchRequest(
@@ -246,15 +411,15 @@ func (h keycloakHandler) Search(
 		attributes9,
 		controls1); ok {
 
-		if res, err := h.usersSearchResult(prefix); err != nil {
-			logger.Error().Err(err).Msg("Search response")
+		if res, err := h.usersSearchResult(sess, prefix); err != nil {
+			logger.Error().Err(err).Msg("search response")
 			return errorSearchResult(), err
 		} else {
 			logger.Debug().
 				Str("BaseDN", req.BaseDN).
 				Str("prefix", prefix).
 				Int("entries", len(res.Entries)).
-				Msg("Search response")
+				Msg("search response")
 			return res, nil
 		}
 	} else if prefix, ok := checkSearchRequest(req,
@@ -264,81 +429,95 @@ func (h keycloakHandler) Search(
 		attributes3,
 		controls1); ok {
 
-		if res, err := h.groupsSearchResult(prefix); err != nil {
+		if res, err := h.groupsSearchResult(sess, prefix); err != nil {
 			return errorSearchResult(), err
 		} else {
 			logger.Debug().
 				Str("BaseDN", req.BaseDN).
 				Str("prefix", prefix).
 				Int("entries", len(res.Entries)).
-				Msg("Search response")
+				Msg("search response")
 			return res, nil
 		}
 	} else {
-		err := unexpected(fmt.Sprintf("BaseDN: \"%s\", "+
-			"Scope: \"%s\", "+
-			"Filter: \"%s\", "+
-			"Attributes: \"%s\", "+
-			"Controls: \"%s\"",
+		err := unexpected(fmt.Sprintf("baseDN: \"%s\", "+
+			"scope: \"%s\", "+
+			"filter: \"%s\", "+
+			"attributes: \"%s\", "+
+			"controls: \"%s\"",
 			req.BaseDN,
 			scope,
 			req.Filter,
 			attributes,
 			controls))
-		logger.Error().Err(err).Msg("Search response")
+		logger.Error().Err(err).Msg("search response")
 		return errorSearchResult(), err
 	}
 }
 
 // Handler (Closer)
 
-func (h keycloakHandler) Close(
+func (h *keycloakHandler) Close(
 	boundDN string,
 	conn net.Conn,
 ) error {
+	if conn == nil && !allowNilConnectionForTests {
+		return errors.New("nil connection not allowed")
+	}
 	logger.Debug().
 		Str("boundDN", boundDN).
-		Msg("Close request")
-	if err := h.checkSession(boundDN, false); err != nil {
-		logger.Error().Err(err).Msg("Close response")
+		Msg("close request")
+	sess := h.getSession(conn)
+	if err := h.checkSession(sess, boundDN, false, h.tokenEndpoint()); err != nil {
+		logger.Error().Err(err).Msg("close response")
 		return err
-	} else {
-		h.session.token = nil
-		h.session.boundDN = nil
-		logger.Debug().Msg("Close response")
+	}
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+	key := h.sessionKeyLocked(conn)
+	if key == "" {
+		// No session for this connection
 		return nil
 	}
+	if conn != nil && h.connToKey != nil {
+		delete(h.connToKey, conn)
+	}
+	if h.sessions != nil {
+		delete(h.sessions, key)
+	}
+	logger.Debug().Msg("close response")
+	return nil
 }
 
 // Handler (Adder)
 
-func (h keycloakHandler) Add(
+func (h *keycloakHandler) Add(
 	boundDN string,
 	req ldap.AddRequest,
 	conn net.Conn,
 ) (ldap.LDAPResultCode, error) {
 	logger.Debug().
 		Str("boundDN", boundDN).
-		Msg("Add")
+		Msg("add")
 	return ldap.LDAPResultOperationsError, unexpected("Add")
 }
 
 // Handler (Modifier)
 
-func (h keycloakHandler) Modify(
+func (h *keycloakHandler) Modify(
 	boundDN string,
 	req ldap.ModifyRequest,
 	conn net.Conn,
 ) (ldap.LDAPResultCode, error) {
 	logger.Debug().
 		Str("boundDN", boundDN).
-		Msg("Modify")
+		Msg("modify")
 	return ldap.LDAPResultOperationsError, unexpected("Modify")
 }
 
 // Handler (Deleter)
 
-func (h keycloakHandler) Delete(
+func (h *keycloakHandler) Delete(
 	boundDN string,
 	deleteDN string,
 	conn net.Conn,
@@ -346,13 +525,13 @@ func (h keycloakHandler) Delete(
 	logger.Debug().
 		Str("boundDN", boundDN).
 		Str("deleteDN", deleteDN).
-		Msg("Delete")
+		Msg("delete")
 	return ldap.LDAPResultOperationsError, unexpected("Delete")
 }
 
 // Handler (HelperMaker)
 
-func (h keycloakHandler) FindUser(
+func (h *keycloakHandler) FindUser(
 	ctx context.Context,
 	userName string,
 	searchByUPN bool,
@@ -360,43 +539,54 @@ func (h keycloakHandler) FindUser(
 	logger.Debug().
 		Str("userName", userName).
 		Bool("searchByUPN", searchByUPN).
-		Msg("FindUser")
+		Msg("findUser")
 	user := config.User{}
 	return false, user, unexpected("FindUser")
 }
 
-func (h keycloakHandler) FindGroup(
+func (h *keycloakHandler) FindGroup(
 	ctx context.Context,
 	groupName string,
 ) (bool, config.Group, error) {
 	logger.Debug().
 		Str("groupName", groupName).
-		Msg("FindGroup")
+		Msg("findGroup")
 	group := config.Group{}
 	return false, group, unexpected("FindGroup")
 }
 
-func (h *keycloakHandler) checkSession(boundDN string, refresh bool) error {
-	if h.session == nil {
+func (h *keycloakHandler) checkSession(s *session, boundDN string, refresh bool, tokenEndpoint string) error {
+	if s == nil {
 		return errors.New("no session")
-	} else if *h.session.boundDN != boundDN {
-		return errors.New(fmt.Sprintf("unexpected boundDN: %s",
-			boundDN))
-	} else if !refresh {
-		return nil
-	} else if err := h.session.refresh(
-		h.config.tokenEndpoint()); err != nil {
-		return err
-	} else {
+	}
+	if s.boundDN == nil || !strings.EqualFold(*s.boundDN, boundDN) {
+		return fmt.Errorf("unexpected boundDN: %s", boundDN)
+	}
+	if s.token == nil {
+		return errors.New("no session token")
+	}
+	s.lastActivity = time.Now()
+	if !refresh {
 		return nil
 	}
+	if s.isUserBound {
+		if !s.token.Valid() {
+			return errors.New("user token expired")
+		}
+		return nil
+	}
+	if err := s.refresh(tokenEndpoint, h.httpClient); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (h *keycloakHandler) groupsSearchResult(
+	s *session,
 	prefix string,
 ) (ldap.ServerSearchResult, error) {
 	groups := &[]Group{}
-	err := h.keycloakGet("groups", groups)
+	err := h.keycloakGet(s, "groups", groups)
 	if err != nil {
 		return errorSearchResult(), err
 	}
@@ -408,11 +598,12 @@ func (h *keycloakHandler) groupsSearchResult(
 		}
 
 		a := make([]*ldap.EntryAttribute, 5)
-		o := sid(group.Name, h.config.vsphereDomain)
+		o := sid(group.Name, h.config.ldapDomain)
 		a[0] = newAttribute("objectClass", "group")
 		a[1] = newAttribute("sAMAccountName", group.Name)
 		a[2] = newAttribute("cn", group.Name)
 		a[3] = newAttribute("description", group.Name)
+		// objectSid: binary SID as string (glauth ldap uses Values []string only)
 		a[4] = newAttribute("objectSid", string(o))
 		logger.Debug().
 			Str("name", group.Name).
@@ -431,28 +622,43 @@ func (h *keycloakHandler) groupsSearchResult(
 }
 
 func (h *keycloakHandler) keycloakGet(
+	s *session,
 	path string,
 	result interface{},
 ) error {
+	if h.config == nil {
+		return errors.New("keycloak REST API: handler config is nil")
+	}
+	if h.restClient == nil {
+		return errors.New("keycloak REST API: rest client is nil")
+	}
+	if s == nil || s.token == nil {
+		return errors.New("keycloak REST API: no session token")
+	}
 	u := h.config.restAPIEndpoint(path)
 	logger.Debug().
 		Str("method", "GET").
 		Str("url", u).
-		Msg("Keycloak REST API request")
+		Msg("keycloak REST API request")
 
 	res, err := h.restClient.R().
 		SetHeader("Accept", "application/json").
-		SetAuthToken(h.session.token.AccessToken).
+		SetAuthToken(s.token.AccessToken).
 		SetResult(result).
 		Get(u)
 	if err == nil && res.StatusCode() != http.StatusOK {
-		err = errors.New(res.Status())
+		logger.Error().
+			Int("status", res.StatusCode()).
+			Str("statusText", res.Status()).
+			Str("body", string(res.Body())).
+			Msg("keycloak REST API non-200")
+		err = fmt.Errorf("keycloak REST API: %s", res.Status())
 	}
 	if err != nil {
-		logger.Error().Err(err).Msg("Keycloak REST API response")
+		logger.Error().Err(err).Msg("keycloak REST API response")
 		return err
 	}
-	logger.Debug().Msg("Keycloak REST API response")
+	logger.Debug().Msg("keycloak REST API response")
 	return nil
 }
 
@@ -474,29 +680,53 @@ func (h *keycloakHandler) rootDSESearchResult() ldap.ServerSearchResult {
 }
 
 func (h *keycloakHandler) usersSearchResult(
+	s *session,
 	prefix string,
 ) (ldap.ServerSearchResult, error) {
 	users := &[]User{}
-	err := h.keycloakGet("users", users)
+	err := h.keycloakGet(s, "users", users)
 	if err != nil {
 		return errorSearchResult(), err
 	}
 
 	e := make([]*ldap.Entry, 0, len(*users))
+	prefixLower := strings.ToLower(prefix)
 	for _, user := range *users {
-		if !strings.HasPrefix(user.Username, prefix) &&
-			!strings.HasPrefix(user.LastName, prefix) {
+		userPrincipalName := fmt.Sprintf("%s@%s", user.Username, h.config.ldapDomain)
+		displayName := strings.TrimSpace(strings.TrimSpace(user.FirstName + " " + user.LastName))
+		usernameLower := strings.ToLower(user.Username)
+		lastNameLower := strings.ToLower(user.LastName)
+		firstNameLower := strings.ToLower(user.FirstName)
+		emailLower := strings.ToLower(user.Email)
+		userPrincipalNameLower := strings.ToLower(userPrincipalName)
+		displayNameLower := strings.ToLower(displayName)
+		// Check if prefix matches any of the searchable fields:
+		// sAMAccountName (Username), sn (LastName), givenName (FirstName), 
+		// cn (Username), displayname, userPrincipalName (Email/Username)
+		if prefix != "" &&
+			!strings.HasPrefix(usernameLower, prefixLower) &&
+			!strings.HasPrefix(lastNameLower, prefixLower) &&
+			!strings.HasPrefix(firstNameLower, prefixLower) &&
+			!strings.HasPrefix(emailLower, prefixLower) &&
+			!strings.HasPrefix(userPrincipalNameLower, prefixLower) &&
+			(displayNameLower == "" || !strings.HasPrefix(displayNameLower, prefixLower)) {
 			continue
 		}
 
-		a := make([]*ldap.EntryAttribute, 7)
+		objectSidBytes := sid(user.ID, h.config.ldapDomain)
+		a := make([]*ldap.EntryAttribute, 11)
 		a[0] = newAttribute("objectClass", "user")
 		a[1] = newAttribute("sAMAccountName", user.Username)
-		a[2] = newAttribute("cn", user.Username)
-		a[3] = newAttribute("givenName", user.FirstName)
-		a[4] = newAttribute("sn", user.LastName)
-		a[5] = newAttribute("mail", user.Email)
-		a[6] = newAttribute("description", "")
+		a[2] = newAttribute("userPrincipalName", userPrincipalName)
+		a[3] = newAttribute("cn", user.Username)
+		a[4] = newAttribute("givenName", user.FirstName)
+		a[5] = newAttribute("sn", user.LastName)
+		a[6] = newAttribute("mail", user.Email)
+		a[7] = newAttribute("description", "")
+		a[8] = newAttribute("userAccountControl", userAccountControlNormal)
+		a[9] = newAttribute("lockoutTime", "0")
+		// objectSid: binary SID as string (glauth ldap uses Values []string only)
+		a[10] = newAttribute("objectSid", string(objectSidBytes))
 
 		logger.Debug().
 			Str("username", user.Username).
@@ -513,8 +743,121 @@ func (h *keycloakHandler) usersSearchResult(
 		ResultCode: ldap.LDAPResultSuccess}, nil
 }
 
+func (h *keycloakHandler) userBoundSearchResult(
+	s *session,
+	boundDN string,
+	req ldap.SearchRequest,
+) (ldap.ServerSearchResult, error) {
+	info, err := h.keycloakUserinfo(s)
+	if err != nil {
+		logger.Error().Err(err).Msg("userinfo failed")
+		return errorSearchResult(), err
+	}
+	userDN := fmt.Sprintf("cn=%s,%s", info.PreferredName, h.baseDNUsers)
+	entryDN := userDN
+	if boundDN != "" {
+		entryDN = boundDN
+	}
+	userPrincipalName := fmt.Sprintf("%s@%s", info.PreferredName, h.config.ldapDomain)
+	samAccountName := info.PreferredName
+	commonName := info.PreferredName
+	if boundCN, ok := parseCommonNameFromDN(boundDN); ok {
+		samAccountName = boundCN
+		commonName = boundCN
+	}
+	objectSidBytes := sid(info.Sub, h.config.ldapDomain)
+	a := make([]*ldap.EntryAttribute, 11)
+	a[0] = newAttribute("objectClass", "user")
+	a[1] = newAttribute("sAMAccountName", samAccountName)
+	a[2] = newAttribute("userPrincipalName", userPrincipalName)
+	a[3] = newAttribute("cn", commonName)
+	a[4] = newAttribute("givenName", info.GivenName)
+	a[5] = newAttribute("sn", info.FamilyName)
+	a[6] = newAttribute("mail", info.Email)
+	a[7] = newAttribute("description", "")
+	a[8] = newAttribute("userAccountControl", userAccountControlNormal)
+	a[9] = newAttribute("lockoutTime", "0")
+	// objectSid: binary SID as string (glauth ldap uses Values []string only)
+	a[10] = newAttribute("objectSid", string(objectSidBytes))
+	entry := &ldap.Entry{DN: entryDN, Attributes: a}
+
+	if req.BaseDN != h.baseDNUsers && req.BaseDN != userDN && req.BaseDN != boundDN {
+		return ldap.ServerSearchResult{
+			Entries:    []*ldap.Entry{},
+			Referrals:  nil,
+			Controls:   nil,
+			ResultCode: ldap.LDAPResultSuccess}, nil
+	}
+	if req.Scope != ldap.ScopeBaseObject && req.Scope != ldap.ScopeSingleLevel && req.Scope != ldap.ScopeWholeSubtree {
+		return ldap.ServerSearchResult{
+			Entries:    []*ldap.Entry{},
+			Referrals:  nil,
+			Controls:   nil,
+			ResultCode: ldap.LDAPResultSuccess}, nil
+	}
+	if req.Scope == ldap.ScopeBaseObject && req.BaseDN != userDN && req.BaseDN != boundDN {
+		return ldap.ServerSearchResult{
+			Entries:    []*ldap.Entry{},
+			Referrals:  nil,
+			Controls:   nil,
+			ResultCode: ldap.LDAPResultSuccess}, nil
+	}
+	if filterUsers.MatchString(req.Filter) || filterUsersWithPrefix.MatchString(req.Filter) {
+		return ldap.ServerSearchResult{
+			Entries:    []*ldap.Entry{entry},
+			Referrals:  nil,
+			Controls:   nil,
+			ResultCode: ldap.LDAPResultSuccess}, nil
+	}
+	return ldap.ServerSearchResult{
+		Entries:    []*ldap.Entry{},
+		Referrals:  nil,
+		Controls:   nil,
+		ResultCode: ldap.LDAPResultSuccess}, nil
+}
+
+func (h *keycloakHandler) keycloakUserinfo(s *session) (*userinfoResponse, error) {
+	if h.config == nil {
+		return nil, errors.New("userinfo: handler config is nil")
+	}
+	if h.restClient == nil {
+		return nil, errors.New("userinfo: rest client is nil")
+	}
+	if s == nil || s.token == nil {
+		return nil, errors.New("userinfo: no session token")
+	}
+	res, err := h.restClient.R().
+		SetHeader("Accept", "application/json").
+		SetAuthToken(s.token.AccessToken).
+		Get(h.config.userinfoEndpointURL)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("userinfo: %s", res.Status())
+	}
+	// Limit response body size to prevent DoS
+	body := res.Body()
+	if len(body) > maxResponseBodySize {
+		return nil, fmt.Errorf("userinfo: response body too large (%d bytes, max %d)", len(body), maxResponseBodySize)
+	}
+	var info userinfoResponse
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, err
+	}
+	if info.PreferredName == "" {
+		info.PreferredName = info.Sub
+	}
+	return &info, nil
+}
+
 func (c *keycloakHandlerConfig) restAPIEndpoint(path string) string {
-	return fmt.Sprintf("https://%s:%d/admin/realms/%s/%s",
+	scheme := c.keycloakScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s:%d/admin/realms/%s/%s",
+		scheme,
 		c.keycloakHostname,
 		c.keycloakPort,
 		c.keycloakRealm,
@@ -522,11 +865,22 @@ func (c *keycloakHandlerConfig) restAPIEndpoint(path string) string {
 }
 
 func (c *keycloakHandlerConfig) tokenEndpoint() string {
-	f := "https://%s:%d/realms/%s/protocol/openid-connect/token"
-	return fmt.Sprintf(f,
+	scheme := c.keycloakScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s:%d/realms/%s/protocol/openid-connect/token",
+		scheme,
 		c.keycloakHostname,
 		c.keycloakPort,
 		c.keycloakRealm)
+}
+
+func (h *keycloakHandler) tokenEndpoint() string {
+	if h.config == nil {
+		return ""
+	}
+	return h.config.tokenEndpoint()
 }
 
 func (s *session) open(
@@ -534,44 +888,77 @@ func (s *session) open(
 	clientID string,
 	clientSecret string,
 	bindDN string,
+	httpClient *http.Client,
 ) error {
-	if token, err := clientCredentialsGrant(tokenEndpoint,
-		clientID, clientSecret); err != nil {
+	token, err := clientCredentialsGrant(tokenEndpoint, clientID, clientSecret, httpClient)
+	if err != nil {
 		return err
-	} else {
-		s.clientID = clientID
-		s.clientSecret = clientSecret
-		s.boundDN = &bindDN
-		s.token = token
-		return nil
 	}
+	s.clientID = clientID
+	s.clientSecret = clientSecret
+	s.boundDN = &bindDN
+	s.token = token
+	s.isUserBound = false
+	s.lastActivity = time.Now()
+	return nil
 }
 
-func (s *session) refresh(tokenEndpoint string) error {
+func (s *session) refresh(tokenEndpoint string, httpClient *http.Client) error {
 	if s.token.Valid() {
 		return nil
-	} else if token, err := clientCredentialsGrant(tokenEndpoint,
-		s.clientID, s.clientSecret); err != nil {
-		return err
-	} else {
-		s.token = token
+	}
+	if s.isUserBound {
 		return nil
 	}
+	token, err := clientCredentialsGrant(tokenEndpoint, s.clientID, s.clientSecret, httpClient)
+	if err != nil {
+		return err
+	}
+	s.token = token
+	return nil
 }
 
+func (s *session) openUser(bindDN string, token *oauth2.Token) {
+	s.boundDN = &bindDN
+	s.token = token
+	s.isUserBound = true
+	s.clientID = ""
+	s.clientSecret = ""
+	s.lastActivity = time.Now()
+}
+
+// NewKeycloakHandler builds a GLAuth handler that uses Keycloak for authentication
+// and group/user data. Configuration is read from environment variables.
+// Returns nil if configuration or initialization fails.
 func NewKeycloakHandler(opts ...handler.Option) handler.Handler {
-	if c, err := newKeycloakHandlerConfig(); err != nil {
-		logger.Error().Err(err).Send()
-		return keycloakHandler{}
-	} else {
-		b := "dc=" + strings.Replace(c.vsphereDomain, ".", ",dc=", -1)
-		return keycloakHandler{
-			config:          c,
-			baseDNUsers:     "cn=users," + b,
-			baseDNGroups:    "cn=groups," + b,
-			baseDNBindUsers: "cn=bind," + b,
-			restClient:      resty.New(),
-			session:         &session{}}
+	config, err := newKeycloakHandlerConfig()
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to initialize keycloak handler config")
+		return nil
+	}
+	transport, err := newHTTPTransport(config)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to create HTTP transport")
+		return nil
+	}
+	httpClient := &http.Client{
+		Transport: transport,
+		Timeout:   httpClientTimeout,
+	}
+	restClient := resty.New().
+		SetTransport(transport).
+		SetTimeout(httpClientTimeout)
+	domainParts := strings.Split(config.ldapDomain, ".")
+	baseDN := "dc=" + strings.Join(domainParts, ",dc=")
+	return &keycloakHandler{
+		config:          config,
+		baseDNUsers:     "cn=users," + baseDN,
+		baseDNGroups:    "cn=groups," + baseDN,
+		baseDNBindUsers: "cn=bind," + baseDN,
+		restClient:      restClient,
+		httpClient:      httpClient,
+		sessions:        make(map[string]*session),
+		connToKey:       make(map[net.Conn]string),
 	}
 }
 
@@ -589,15 +976,15 @@ func checkSearchRequest(
 		len(req.Controls) != len(controls) {
 		return "", false
 	}
-	for i, a := range attributes {
-		if req.Attributes[i] != a {
-			return "", false
-		}
+	if !sameStringMultiset(req.Attributes, attributes) {
+		return "", false
 	}
-	for i, c := range controls {
-		if req.Controls[i].GetControlType() != c {
-			return "", false
-		}
+	controlTypes := make([]string, 0, len(req.Controls))
+	for _, control := range req.Controls {
+		controlTypes = append(controlTypes, control.GetControlType())
+	}
+	if !sameStringMultiset(controlTypes, controls) {
+		return "", false
 	}
 
 	if g := filterRegexp.FindStringSubmatch(req.Filter); g == nil {
@@ -605,20 +992,38 @@ func checkSearchRequest(
 	} else if len(g) == 1 {
 		return "", true // no prefix
 	} else {
-		prefix := g[1]
-		for _, gg := range g[2:] {
-			if gg != prefix {
-				return "", false
+		// use first non-empty capture as prefix (capture groups may differ, e.g. jo vs john)
+		for _, cap := range g[1:] {
+			if cap != "" {
+				return cap, true
 			}
 		}
-		return prefix, true
+		return "", true
 	}
+}
+
+func sameStringMultiset(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[string]int, len(left))
+	for _, value := range left {
+		counts[value]++
+	}
+	for _, value := range right {
+		counts[value]--
+		if counts[value] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func clientCredentialsGrant(
 	tokenEndpoint string,
 	clientID string,
 	clientSecret string,
+	httpClient *http.Client,
 ) (*oauth2.Token, error) {
 	oauth2Config := &clientcredentials.Config{
 		TokenURL:       tokenEndpoint,
@@ -627,28 +1032,150 @@ func clientCredentialsGrant(
 		Scopes:         nil,
 		EndpointParams: url.Values{}}
 
-	ctx := context.Background()
+	// Create context with timeout to prevent hanging requests
+	ctx, cancel := context.WithTimeout(context.Background(), httpClientTimeout)
+	defer cancel()
+	
+	if httpClient != nil {
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
+	}
 	logger.Debug().
 		Str("endpoint", tokenEndpoint).
 		Str("grant_type", "client_credentials").
 		Str("client_id", clientID).
-		Msg("OAuth 2.0 authorization request")
+		Msg("oauth 2.0 authorization request")
 
-	if token, err := oauth2Config.TokenSource(ctx).Token(); err != nil {
-		logger.Error().Err(err).Msg("OAuth 2.0 error response")
+	token, err := oauth2Config.TokenSource(ctx).Token()
+	if err != nil {
+		logger.Error().Err(err).Msg("oauth 2.0 error response")
 		return nil, err
-	} else if !token.Valid() {
-		err := errors.New("invalid token")
-		logger.Error().Err(err).Msg("OAuth 2.0 error response")
-		return nil, err
-	} else {
-		logger.Debug().Msg("OAuth 2.0 access token response")
-		return token, nil
 	}
+	if !token.Valid() {
+		err := errors.New("invalid token")
+		logger.Error().Err(err).Msg("oauth 2.0 error response")
+		return nil, err
+	}
+	logger.Debug().Msg("oauth 2.0 access token response")
+	return token, nil
+}
+
+func passwordGrant(
+	tokenEndpoint string,
+	clientID string,
+	clientSecret string,
+	username string,
+	password string,
+	httpClient *http.Client,
+) (*oauth2.Token, error) {
+	data := url.Values{}
+	data.Set("grant_type", "password")
+	data.Set("client_id", clientID)
+	data.Set("client_secret", clientSecret)
+	data.Set("username", username)
+	data.Set("password", password)
+
+	logger.Debug().
+		Str("endpoint", tokenEndpoint).
+		Str("grant_type", "password").
+		Str("username", username).
+		Msg("oauth 2.0 password grant request")
+
+	client := httpClient
+	if client == nil {
+		client = &http.Client{Timeout: httpClientTimeout}
+	}
+	
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), httpClientTimeout)
+	defer cancel()
+	
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenEndpoint, strings.NewReader(data.Encode()))
+	if err != nil {
+		logger.Error().Err(err).Msg("password grant request creation failed")
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.Error().Err(err).Msg("password grant request failed")
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error().Str("status", resp.Status).Int("code", resp.StatusCode).Msg("password grant error response")
+		return nil, errors.New("invalid credentials")
+	}
+
+	var tr struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+	}
+	// Limit response body size to prevent DoS
+	limitedReader := io.LimitReader(resp.Body, maxResponseBodySize)
+	if err := json.NewDecoder(limitedReader).Decode(&tr); err != nil {
+		logger.Error().Err(err).Msg("password grant decode failed")
+		return nil, err
+	}
+	if tr.AccessToken == "" {
+		return nil, errors.New("invalid token")
+	}
+	tok := &oauth2.Token{
+		AccessToken:  tr.AccessToken,
+		TokenType:    tr.TokenType,
+		RefreshToken: tr.RefreshToken,
+	}
+	if tr.ExpiresIn > 0 {
+		tok.Expiry = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+	}
+	logger.Debug().Msg("oauth 2.0 password grant success")
+	return tok, nil
+}
+
+func parseUsernameFromUserBindDN(bindDN string, baseDNUsers string) (username string, ok bool) {
+	sufUsers := "," + baseDNUsers
+	if !strings.HasPrefix(bindDN, "cn=") || !strings.HasSuffix(bindDN, sufUsers) {
+		return "", false
+	}
+	rest := strings.TrimSuffix(bindDN, sufUsers)
+	if rest == bindDN {
+		return "", false
+	}
+	username = strings.TrimPrefix(rest, "cn=")
+	if i := strings.Index(username, ","); i >= 0 {
+		username = username[:i]
+	}
+	// Validate username is non-empty
+	if username == "" {
+		return "", false
+	}
+	return username, true
+}
+
+func parseCommonNameFromDN(dn string) (string, bool) {
+	if dn == "" {
+		return "", false
+	}
+	parts := strings.Split(dn, ",")
+	if len(parts) == 0 {
+		return "", false
+	}
+	first := strings.TrimSpace(parts[0])
+	if !strings.HasPrefix(strings.ToLower(first), "cn=") {
+		return "", false
+	}
+	cn := strings.TrimSpace(first[3:])
+	if cn == "" {
+		return "", false
+	}
+	return cn, true
 }
 
 func envNotSet(key string) error {
-	return errors.New(fmt.Sprintf("environment variable not set: %s", key))
+	return fmt.Errorf("environment variable not set: %s", key)
 }
 
 func errorSearchResult() ldap.ServerSearchResult {
@@ -661,7 +1188,13 @@ func errorSearchResult() ldap.ServerSearchResult {
 
 func getenv(key string) string {
 	s := os.Getenv(key)
-	logger.Debug().Str("env", key).Str("value", s).Send()
+	if strings.Contains(strings.ToUpper(key), "SECRET") ||
+		strings.Contains(strings.ToUpper(key), "PASSWORD") ||
+		strings.Contains(strings.ToUpper(key), "TOKEN") {
+		logger.Debug().Str("env", key).Str("value", hide(s)).Send()
+	} else {
+		logger.Debug().Str("env", key).Str("value", s).Send()
+	}
 	return s
 }
 
@@ -685,8 +1218,7 @@ func newKeycloakHandlerConfig() (*keycloakHandlerConfig, error) {
 	if s := getenv("KEYCLOAK_PORT"); s == "" {
 		c.keycloakPort = 8444
 	} else if p, err := strconv.Atoi(s); err != nil {
-		return nil, errors.New(fmt.Sprintf(
-			"invalid port number: %s", s))
+		return nil, fmt.Errorf("invalid port number: %s", s)
 	} else {
 		c.keycloakPort = p
 	}
@@ -697,22 +1229,90 @@ func newKeycloakHandlerConfig() (*keycloakHandlerConfig, error) {
 		c.keycloakRealm = s
 	}
 
-	if s := getenv("VSPHERE_DOMAIN"); s == "" {
-		return nil, envNotSet("VSPHERE_DOMAIN")
+	if s := getenv("LDAP_DOMAIN"); s == "" {
+		return nil, envNotSet("LDAP_DOMAIN")
 	} else {
-		c.vsphereDomain = strings.TrimSuffix(s, ".")
+		domain := strings.TrimSuffix(s, ".")
+		// Basic validation: domain should not be empty after trimming and should contain valid characters
+		if domain == "" || domain == "." {
+			return nil, fmt.Errorf("invalid LDAP_DOMAIN: domain is empty or invalid")
+		}
+		// Check for invalid characters and patterns
+		if strings.Contains(domain, "..") || strings.Contains(domain, " ") {
+			return nil, fmt.Errorf("invalid LDAP_DOMAIN: contains invalid characters or consecutive dots")
+		}
+		c.ldapDomain = domain
 	}
+
+	if s := getenv("KEYCLOAK_SCHEME"); s != "" {
+		c.keycloakScheme = s
+	}
+
+	c.keycloakCAFile = getenv("KEYCLOAK_CA_FILE")
+	switch strings.ToLower(strings.TrimSpace(getenv("KEYCLOAK_INSECURE_SKIP_VERIFY"))) {
+	case "1", "true", "yes":
+		c.keycloakInsecureSkipVerify = true
+	default:
+		c.keycloakInsecureSkipVerify = false
+	}
+
+	c.ldapClientID = getenv("KEYCLOAK_LDAP_CLIENT_ID")
+	c.ldapClientSecret = getenv("KEYCLOAK_LDAP_CLIENT_SECRET")
+	scheme := c.keycloakScheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	c.userinfoEndpointURL = fmt.Sprintf("%s://%s:%d/realms/%s/protocol/openid-connect/userinfo",
+		scheme, c.keycloakHostname, c.keycloakPort, c.keycloakRealm)
 
 	return c, nil
 }
 
+// newTLSConfig builds a *tls.Config from config. If KEYCLOAK_CA_FILE is set, root CAs are loaded from that PEM file.
+// If KEYCLOAK_INSECURE_SKIP_VERIFY is true, server certificate verification is skipped (dev/test only).
+func newTLSConfig(c *keycloakHandlerConfig) (*tls.Config, error) {
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if c.keycloakInsecureSkipVerify {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	if c.keycloakCAFile != "" {
+		pemBytes, err := os.ReadFile(c.keycloakCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading KEYCLOAK_CA_FILE: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pemBytes) {
+			return nil, fmt.Errorf("no certificates found in KEYCLOAK_CA_FILE: %s", c.keycloakCAFile)
+		}
+		tlsConfig.RootCAs = pool
+	}
+	return tlsConfig, nil
+}
+
+const (
+	httpClientTimeout        = 30 * time.Second
+	httpClientHandshakeTimeout = 10 * time.Second
+)
+
+// newHTTPTransport returns an http.RoundTripper with TLS and timeouts for use by the shared HTTP client and resty.
+func newHTTPTransport(c *keycloakHandlerConfig) (http.RoundTripper, error) {
+	tlsConfig, err := newTLSConfig(c)
+	if err != nil {
+		return nil, err
+	}
+	return &http.Transport{
+		TLSClientConfig:     tlsConfig,
+		TLSHandshakeTimeout: httpClientHandshakeTimeout,
+	}, nil
+}
+
+// sid returns the binary Windows SID (OCTET STRING) for the given id and domain.
+// LDAP objectSid is binary; the glauth ldap package uses EntryAttribute.Values []string
+// with no separate binary type, so callers pass string(sid(...)) when setting objectSid.
 // https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-sid
 func sid(id, domain string) []byte {
-	h := sha1.New()
-	d := h.Sum([]byte(domain))
-
-	h = sha1.New()
-	i := h.Sum([]byte(id))
+	d := sha256.Sum256([]byte(domain))
+	i := sha256.Sum256([]byte(id))
 
 	b := make([]byte, 1+1+6+5*4)
 	b[0] = 1
@@ -720,12 +1320,8 @@ func sid(id, domain string) []byte {
 	binary.BigEndian.PutUint16(b[2:], 0)
 	binary.BigEndian.PutUint32(b[4:], 5)
 	binary.LittleEndian.PutUint32(b[8:], 21)
-	for j := 0; j < 3*4; j++ {
-		b[12+j] = d[j]
-	}
-	for j := 0; j < 1*4; j++ {
-		b[24+j] = i[j]
-	}
+	copy(b[12:24], d[:12])
+	copy(b[24:28], i[:4])
 	return b
 }
 
@@ -745,5 +1341,5 @@ func sidToString(b []byte) string {
 }
 
 func unexpected(msg string) error {
-	return errors.New(fmt.Sprintf("unexpected call: %s", msg))
+	return fmt.Errorf("unexpected call: %s", msg)
 }
