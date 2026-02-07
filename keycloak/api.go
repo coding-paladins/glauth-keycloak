@@ -20,11 +20,12 @@ type Role struct {
 }
 
 type User struct {
-	Email     string `json:"email"`
-	FirstName string `json:"firstName"`
-	ID        string `json:"id"`
-	LastName  string `json:"lastName"`
-	Username  string `json:"username"`
+	Email      string              `json:"email"`
+	FirstName  string              `json:"firstName"`
+	ID         string              `json:"id"`
+	LastName   string              `json:"lastName"`
+	Username   string              `json:"username"`
+	Attributes map[string][]string `json:"attributes"`
 }
 
 type userinfoResponse struct {
@@ -35,6 +36,7 @@ type userinfoResponse struct {
 	GivenName     string   `json:"given_name"`
 	FamilyName    string   `json:"family_name"`
 	EmailVerified bool     `json:"email_verified"`
+	Picture       string   `json:"picture"`
 	Groups        []string `json:"groups"` // optional: Keycloak groups mapper with "Add to userinfo"
 	Roles         []string `json:"-"`      // all roles: filled from "roles", "realm_roles", or "realm_access.roles"
 }
@@ -57,6 +59,7 @@ type userinfoDecode struct {
 	GivenName      string                    `json:"given_name"`
 	FamilyName     string                    `json:"family_name"`
 	EmailVerified  bool                      `json:"email_verified"`
+	Picture        string                    `json:"picture"`
 	Groups         []string                  `json:"groups"`
 	Roles          []string                  `json:"roles"`
 	RealmRoles     []string                  `json:"realm_roles"`
@@ -78,6 +81,14 @@ func (h *keycloakHandler) keycloakRoleUsersPath(roleName string) string {
 	return fmt.Sprintf("roles/%s/users", roleName)
 }
 
+func (h *keycloakHandler) keycloakUserRoleMappingsCompositePath(userID string) string {
+	return fmt.Sprintf("users/%s/role-mappings/realm/composite", userID)
+}
+
+func (h *keycloakHandler) keycloakGroupMembersPath(groupID string) string {
+	return fmt.Sprintf("groups/%s/members", groupID)
+}
+
 // UnmarshalJSON fills userinfoResponse including Roles: realm roles plus client roles with "clientId:roleName" prefix.
 func (u *userinfoResponse) UnmarshalJSON(data []byte) error {
 	var dec userinfoDecode
@@ -91,6 +102,7 @@ func (u *userinfoResponse) UnmarshalJSON(data []byte) error {
 	u.GivenName = dec.GivenName
 	u.FamilyName = dec.FamilyName
 	u.EmailVerified = dec.EmailVerified
+	u.Picture = dec.Picture
 	u.Groups = dec.Groups
 	u.Roles = rolesFromDecode(&dec)
 	return nil

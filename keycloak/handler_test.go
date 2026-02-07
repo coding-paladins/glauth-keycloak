@@ -333,7 +333,7 @@ func TestBug5_FirstNamePrefixNotChecked(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=user)(|(sAMAccountName=Bob*)(sn=Bob*)(givenName=Bob*)(cn=Bob*)(displayname=Bob*)(userPrincipalName=Bob*)))",
+		Filter:     "(&(objectClass=user)(|(uid=Bob*)(sn=Bob*)(givenName=Bob*)(cn=Bob*)(displayname=Bob*)(userPrincipalName=Bob*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)

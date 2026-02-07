@@ -54,7 +54,7 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 	usersResult, err := connection.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		"(objectClass=user)",
-		[]string{"sAMAccountName", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
+		[]string{"uid", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
 		[]ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
@@ -65,8 +65,8 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 
 	usersPrefixResult, err := connection.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		"(&(objectClass=user)(|(sAMAccountName=te*)(sn=te*)(givenName=te*)(cn=te*)(displayname=te*)(userPrincipalName=te*)))",
-		[]string{"sAMAccountName", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
+		"(&(objectClass=user)(|(uid=te*)(sn=te*)(givenName=te*)(cn=te*)(displayname=te*)(userPrincipalName=te*)))",
+		[]string{"uid", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
 		[]ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
@@ -75,13 +75,13 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 	}
 	fmt.Printf("users prefix (te*) search: %d entries\n", len(usersPrefixResult.Entries))
 
-	// Jellyfin-style exact user lookup: (&(objectClass=user)(|(sAMAccountName={user})(mail={user})(cn={user}))).
+	// Jellyfin-style exact user lookup: (&(objectClass=user)(|(uid={user})(mail={user})(cn={user}))).
 	// Must return at least one entry for the bound user.
 	exactFilter := buildJellyfinExactUserFilter(bindUser)
 	exactResult, exactErr := connection.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		exactFilter,
-		[]string{"sAMAccountName", "userPrincipalName", "cn", "mail"},
+		[]string{"uid", "userPrincipalName", "cn", "mail"},
 		[]ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if exactErr != nil {
@@ -121,7 +121,7 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 	memberOfResult, err := connection.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		memberOfFilter,
-		[]string{"sAMAccountName", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
+		[]string{"uid", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
 		[]ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
@@ -146,7 +146,7 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 	memberOfRolesResult, err := connection.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
 		memberOfRolesFilter,
-		[]string{"sAMAccountName", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
+		[]string{"uid", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
 		[]ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
@@ -262,9 +262,9 @@ func parseGroupNameFromMemberOfDN(dn string) string {
 
 // buildJellyfinExactUserFilter builds the filter Jellyfin sends for user lookup: exact match on username/mail/cn.
 func buildJellyfinExactUserFilter(username string) string {
-	// Jellyfin: (&(objectClass=user)(|(sAMAccountName={username})(mail={username})(cn={username}))).
+	// Jellyfin: (&(objectClass=user)(|(uid={username})(mail={username})(cn={username}))).
 	escaped := ldap.EscapeFilter(username)
-	return "(&(objectClass=user)(|(sAMAccountName=" + escaped + ")(mail=" + escaped + ")(cn=" + escaped + ")))"
+	return "(&(objectClass=user)(|(uid=" + escaped + ")(mail=" + escaped + ")(cn=" + escaped + ")))"
 }
 
 func buildMemberOfFilter(commaSeparatedGroups, groupsBaseDN string) string {
@@ -315,7 +315,7 @@ func probeAnonymousBind(ldapURL, baseDN string) {
 	usersBase := "cn=users," + baseDN
 	result, searchErr := conn.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		"(objectClass=user)", []string{"sAMAccountName"}, []ldap.Control{ldap.NewControlPaging(100)},
+		"(objectClass=user)", []string{"uid"}, []ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if searchErr != nil || (result != nil && len(result.Entries) > 0) {
 		fmt.Println("  [anonymous bind] CHECK: anonymous bind accepted; review if anonymous access is intended")
@@ -417,7 +417,7 @@ func probeSearchWithoutBind(ldapURL, baseDN string) {
 	usersBase := "cn=users," + baseDN
 	_, err = conn.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		"(objectClass=user)", []string{"sAMAccountName"}, []ldap.Control{ldap.NewControlPaging(100)},
+		"(objectClass=user)", []string{"uid"}, []ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
 		fmt.Println("  [search without bind] PASS: search without prior bind rejected")
@@ -443,7 +443,7 @@ func probeFilterInjection(ldapURL, baseDN, bindUser, bindPassword string) {
 	maliciousFilter := "(objectClass=user)(|(cn=*))"
 	result, err := conn.Search(ldap.NewSearchRequest(
 		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		maliciousFilter, []string{"sAMAccountName"}, []ldap.Control{ldap.NewControlPaging(100)},
+		maliciousFilter, []string{"uid"}, []ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
 		fmt.Println("  [filter injection] PASS: non-whitelisted filter rejected")
@@ -472,7 +472,7 @@ func probeBaseDNTraversal(ldapURL, baseDN, bindUser, bindPassword string) {
 	otherBase := "cn=users,dc=other,dc=evil,dc=com"
 	result, err := conn.Search(ldap.NewSearchRequest(
 		otherBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		"(objectClass=user)", []string{"sAMAccountName"}, []ldap.Control{ldap.NewControlPaging(100)},
+		"(objectClass=user)", []string{"uid"}, []ldap.Control{ldap.NewControlPaging(100)},
 	))
 	if err != nil {
 		fmt.Println("  [base DN traversal] PASS: search with different base DN rejected or error")

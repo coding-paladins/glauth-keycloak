@@ -22,7 +22,7 @@ var attributes3 = []string{
 }
 
 var attributes9 = []string{
-	"sAMAccountName",
+	"uid",
 	"userPrincipalName",
 	"description",
 	"givenName",

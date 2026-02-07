@@ -191,10 +191,10 @@ func TestGetOrCreateSessionInitializesSessionsWhenNil(t *testing.T) {
 
 func TestSessionRefreshMissingClientCredentials(t *testing.T) {
 	s := &session{
-		boundDN:     strPtr("cn=svc,cn=bind,dc=example,dc=com"),
-		token:       &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)},
-		isUserBound: false,
-		clientID:    "",
+		boundDN:      strPtr("cn=svc,cn=bind,dc=example,dc=com"),
+		token:        &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)},
+		isUserBound:  false,
+		clientID:     "",
 		clientSecret: "",
 	}
 	err := s.refresh(&nopLogger, "http://127.0.0.1/token", nil)

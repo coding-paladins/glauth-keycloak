@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/glauth/ldap"
 	"github.com/stretchr/testify/assert"
@@ -121,7 +122,7 @@ func TestJellyfinExactUserLookup(t *testing.T) {
 	require.EqualValues(t, ldap.LDAPResultSuccess, code)
 
 	// Jellyfin builds this when user logs in: exact match on username or mail (no wildcard).
-	exactFilter := "(&(objectClass=user)(|(sAMAccountName=alice)(mail=alice@example.com)))"
+	exactFilter := "(&(objectClass=user)(|(uid=alice)(mail=alice@example.com)))"
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
@@ -158,7 +159,7 @@ func TestJellyfinExactUserLookupOrderAgnostic(t *testing.T) {
 	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
 	require.EqualValues(t, ldap.LDAPResultSuccess, code)
 
-	orderAgnosticFilter := "(&(objectClass=user)(|(cn=alice)(mail=alice@example.com)(sAMAccountName=alice)))"
+	orderAgnosticFilter := "(&(objectClass=user)(|(cn=alice)(mail=alice@example.com)(uid=alice)))"
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
@@ -197,7 +198,7 @@ func TestSearchUsersWithPrefix(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=user)(|(sAMAccountName=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
+		Filter:     "(&(objectClass=user)(|(uid=al*)(sn=al*)(givenName=al*)(cn=al*)(displayname=al*)(userPrincipalName=al*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -512,20 +513,20 @@ func TestSearchGroupsKeycloakGetError(t *testing.T) {
 	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
 }
 
-func TestSearchUnexpectedSizeLimit(t *testing.T) {
+func TestSearchAcceptsSizeLimit(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
 	h := makeHandlerWithConfig(config)
 	dn := "cn=svc,cn=bind,dc=example,dc=com"
-	h.sessions["default"] = &session{boundDN: &dn, token: &oauth2.Token{AccessToken: "x"}}
+	h.sessions["default"] = &session{boundDN: &dn, token: &oauth2.Token{AccessToken: "x"}, lastActivity: time.Now()}
 
 	req := ldap.SearchRequest{
 		BaseDN: "", Scope: ldap.ScopeBaseObject, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 1, TimeLimit: 0, TypesOnly: false,
+		SizeLimit: 1000, TimeLimit: 0, TypesOnly: false,
 		Filter: "(objectclass=*)", Attributes: []string{}, Controls: []ldap.Control{},
 	}
 	res, err := h.Search(dn, req, nil)
-	assert.Error(t, err)
-	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
+	assert.NoError(t, err)
+	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
 }
 
 func TestSearchUnexpectedTimeLimit(t *testing.T) {
@@ -629,12 +630,14 @@ func TestSearchUserBoundScopeSingleLevelWithBaseUsers(t *testing.T) {
 }
 
 func TestValidateSearchRequestConstraintsSuccess(t *testing.T) {
-	req := ldap.SearchRequest{
-		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree,
-		DerefAliases: ldap.NeverDerefAliases, SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+	for _, sizeLimit := range []int{0, 1, 1000} {
+		req := ldap.SearchRequest{
+			BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree,
+			DerefAliases: ldap.NeverDerefAliases, SizeLimit: sizeLimit, TimeLimit: 0, TypesOnly: false,
+		}
+		err := validateSearchRequestConstraints(req)
+		assert.NoError(t, err, "SizeLimit=%d should be accepted", sizeLimit)
 	}
-	err := validateSearchRequestConstraints(req)
-	assert.NoError(t, err)
 }
 
 func TestIsSingleLevelScopeMatchInvalidEntryDN(t *testing.T) {
@@ -881,7 +884,7 @@ func TestSearchUsersWithPrefixNoMatch(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=user)(|(sAMAccountName=z*)(sn=z*)(givenName=z*)(cn=z*)(displayname=z*)(userPrincipalName=z*)))",
+		Filter:     "(&(objectClass=user)(|(uid=z*)(sn=z*)(givenName=z*)(cn=z*)(displayname=z*)(userPrincipalName=z*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -916,7 +919,7 @@ func TestSearchUsersWithUserPrincipalNamePrefix(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=user)(|(sAMAccountName=alice@*)(sn=alice@*)(givenName=alice@*)(cn=alice@*)(displayname=alice@*)(userPrincipalName=alice@*)))",
+		Filter:     "(&(objectClass=user)(|(uid=alice@*)(sn=alice@*)(givenName=alice@*)(cn=alice@*)(displayname=alice@*)(userPrincipalName=alice@*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1001,9 +1004,9 @@ func TestUserBoundEntryAttributesMatchBoundDN(t *testing.T) {
 	entry := res.Entries[0]
 
 	cnAttr := entry.GetAttributeValue("cn")
-	samAccountNameAttr := entry.GetAttributeValue("sAMAccountName")
+	uidAttr := entry.GetAttributeValue("uid")
 	assert.Equal(t, "alice", cnAttr, "cn should match boundDN when entry DN is boundDN")
-	assert.Equal(t, "alice", samAccountNameAttr, "sAMAccountName should match boundDN when entry DN is boundDN")
+	assert.Equal(t, "alice", uidAttr, "uid should match boundDN when entry DN is boundDN")
 }
 
 func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
@@ -1032,7 +1035,7 @@ func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=user)(|(sAMAccountName=AL*)(sn=AL*)(givenName=AL*)(cn=AL*)(displayname=AL*)(userPrincipalName=AL*)))",
+		Filter:     "(&(objectClass=user)(|(uid=AL*)(sn=AL*)(givenName=AL*)(cn=AL*)(displayname=AL*)(userPrincipalName=AL*)))",
 		Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1223,18 +1226,27 @@ func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 }
 
 func TestSearchMemberOfRolesUsesRoleNameInAPIPath(t *testing.T) {
-	var rolesUsersPathReceived string
+	var usersPathReceived string
+	var compositePathReceived string
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/admin/realms/test/roles/") && strings.HasSuffix(r.URL.Path, "/users") && r.Method == "GET" {
-			rolesUsersPathReceived = r.URL.Path
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+			usersPathReceived = r.URL.Path
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
 				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/role-mappings/realm/composite") && r.Method == "GET" {
+			compositePathReceived = r.URL.Path
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "role-1", Name: "jellyfin-users"},
 			})
 			return
 		}
@@ -1258,27 +1270,36 @@ func TestSearchMemberOfRolesUsesRoleNameInAPIPath(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
 
-	require.Equal(t, "/admin/realms/test/roles/jellyfin-users/users", rolesUsersPathReceived,
-		"Keycloak roles endpoint expects role name in path (roles/{role-name}/users), not role ID; got path %q", rolesUsersPathReceived)
+	require.Equal(t, "/admin/realms/test/users", usersPathReceived, "should fetch all users")
+	require.Contains(t, compositePathReceived, "/users/user-1/role-mappings/realm/composite",
+		"should get composite roles for each user to include inherited roles")
 	require.Len(t, res.Entries, 1)
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
 }
 
-func TestSearchMemberOfRolesOneRoleFailsContinues(t *testing.T) {
+func TestSearchMemberOfRolesOneUserRoleMappingFailsContinues(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if strings.HasSuffix(r.URL.Path, "/roles/good-role/users") && r.Method == "GET" {
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
 				{ID: "u1", Username: "alice", FirstName: "A", LastName: "B", Email: "a@b.com"},
+				{ID: "u2", Username: "bob", FirstName: "B", LastName: "C", Email: "b@c.com"},
 			})
 			return
 		}
-		if strings.HasSuffix(r.URL.Path, "/roles/bad-role/users") && r.Method == "GET" {
+		if r.URL.Path == "/admin/realms/test/users/u1/role-mappings/realm/composite" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "r1", Name: "good-role"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users/u2/role-mappings/realm/composite" && r.Method == "GET" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1300,8 +1321,131 @@ func TestSearchMemberOfRolesOneRoleFailsContinues(t *testing.T) {
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	require.NoError(t, err)
 	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "should return users from good-role despite bad-role failing")
+	require.Len(t, res.Entries, 1, "should return users from good-role despite one user role-mappings failing")
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
+}
+
+func TestSearchMemberOfRolesWithInheritedCompositeRoles(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{
+				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
+				{ID: "user-2", Username: "bob", FirstName: "Bob", LastName: "B", Email: "bob@example.com"},
+				{ID: "user-3", Username: "carol", FirstName: "Carol", LastName: "C", Email: "carol@example.com"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users/user-1/role-mappings/realm/composite" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "role-1", Name: "watch-jellyfin"},
+				{ID: "role-2", Name: "default-roles-societycell"},
+				{ID: "role-3", Name: "offline_access"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users/user-2/role-mappings/realm/composite" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "role-4", Name: "manage-jellyfin"},
+				{ID: "role-5", Name: "watch-jellyfin"},
+				{ID: "role-2", Name: "default-roles-societycell"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users/user-3/role-mappings/realm/composite" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "role-2", Name: "default-roles-societycell"},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.ldapDomain = "example.com"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	memberOfRolesFilter := "(|(memberOf=cn=watch-jellyfin,ou=roles,dc=example,dc=com)(memberOf=cn=manage-jellyfin,ou=roles,dc=example,dc=com))"
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: memberOfRolesFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+
+	require.Len(t, res.Entries, 2, "should return alice (watch-jellyfin inherited) and bob (both roles)")
+	usernames := make([]string, len(res.Entries))
+	for i, entry := range res.Entries {
+		usernames[i] = entry.GetAttributeValue("cn")
+	}
+	assert.Contains(t, usernames, "alice")
+	assert.Contains(t, usernames, "bob")
+	assert.NotContains(t, usernames, "carol", "carol has no watch-jellyfin or manage-jellyfin role")
+
+	bobEntry := res.Entries[0]
+	if bobEntry.GetAttributeValue("cn") != "bob" {
+		bobEntry = res.Entries[1]
+	}
+	memberOf := bobEntry.GetAttributeValues("memberOf")
+	assert.Contains(t, memberOf, "cn=watch-jellyfin,ou=roles,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=manage-jellyfin,ou=roles,dc=example,dc=com")
+}
+
+func TestSearchMemberOfRolesWithRolesBaseDN(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{
+				{ID: "user-1", Username: "admin", FirstName: "Admin", LastName: "User", Email: "admin@example.com"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users/user-1/role-mappings/realm/composite" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Role{
+				{ID: "role-1", Name: "manage-jellyfin"},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.ldapDomain = "example.com"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	adminFilter := "(memberOf=cn=manage-jellyfin,ou=roles,dc=example,dc=com)"
+	req := ldap.SearchRequest{
+		BaseDN: "ou=roles,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: adminFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1, "admin search with baseDN=ou=roles should work (Jellyfin admin filter)")
+	assert.Equal(t, "cn=admin,cn=users,dc=example,dc=com", res.Entries[0].DN)
 }
 
 func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
@@ -1339,12 +1483,12 @@ func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
 	require.EqualValues(t, ldap.LDAPResultSuccess, code, "bind as user test must succeed")
 
 	usersBase := "cn=users," + baseDN
-	exactFilter := "(&(objectClass=user)(|(sAMAccountName=" + bindUser + ")(mail=" + bindUser + ")(cn=" + bindUser + ")))"
+	exactFilter := "(&(objectClass=user)(|(uid=" + bindUser + ")(mail=" + bindUser + ")(cn=" + bindUser + ")))"
 	req := ldap.SearchRequest{
 		BaseDN: usersBase, Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
 		Filter:     exactFilter,
-		Attributes: []string{"sAMAccountName", "userPrincipalName", "cn", "mail"},
+		Attributes: []string{"uid", "userPrincipalName", "cn", "mail"},
 		Controls:   []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
@@ -1352,4 +1496,117 @@ func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
 	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
 	require.Len(t, res.Entries, 1, "exact user lookup (Jellyfin-style) must return at least one entry for bound user %q", bindUser)
 	assert.Equal(t, "cn="+bindUser+","+usersBase, res.Entries[0].DN)
+}
+
+func TestSearchUsersWithPictureAttribute(t *testing.T) {
+	users := []User{
+		{ID: "id1", Username: "alice", Email: "alice@example.com", FirstName: "Alice", LastName: "Smith",
+			Attributes: map[string][]string{"picture": {"https://example.com/avatars/alice.jpg"}}},
+		{ID: "id2", Username: "bob", Email: "bob@example.com", FirstName: "Bob", LastName: "Jones",
+			Attributes: map[string][]string{}},
+		{ID: "id3", Username: "charlie", Email: "charlie@example.com", FirstName: "Charlie", LastName: "Brown",
+			Attributes: nil},
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(users)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	h := makeHandlerWithConfig(config)
+
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN:       "cn=users,dc=example,dc=com",
+		Scope:        ldap.ScopeWholeSubtree,
+		DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit:    0,
+		TimeLimit:    0,
+		TypesOnly:    false,
+		Filter:       "(objectClass=user)",
+		Attributes:   []string{"uid", "cn", "mail", "jpegPhoto"},
+		Controls:     []ldap.Control{},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 3)
+
+	aliceEntry := res.Entries[0]
+	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", aliceEntry.DN)
+	jpegPhotoAttr := aliceEntry.GetAttributeValue("jpegPhoto")
+	assert.Equal(t, "https://example.com/avatars/alice.jpg", jpegPhotoAttr, "alice should have jpegPhoto attribute from Keycloak picture")
+
+	bobEntry := res.Entries[1]
+	assert.Equal(t, "cn=bob,cn=users,dc=example,dc=com", bobEntry.DN)
+	bobJpegPhoto := bobEntry.GetAttributeValue("jpegPhoto")
+	assert.Empty(t, bobJpegPhoto, "bob should not have jpegPhoto attribute (empty attributes map)")
+
+	charlieEntry := res.Entries[2]
+	assert.Equal(t, "cn=charlie,cn=users,dc=example,dc=com", charlieEntry.DN)
+	charlieJpegPhoto := charlieEntry.GetAttributeValue("jpegPhoto")
+	assert.Empty(t, charlieJpegPhoto, "charlie should not have jpegPhoto attribute (nil attributes)")
+}
+
+func TestSearchUserBoundWithPicture(t *testing.T) {
+	userinfoResp := map[string]interface{}{
+		"sub":                "sub-alice",
+		"preferred_username": "alice",
+		"given_name":         "Alice",
+		"family_name":        "Smith",
+		"email":              "alice@example.com",
+		"picture":            "https://example.com/avatars/alice.jpg",
+	}
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(userinfoResp)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	h := makeHandlerWithConfig(config)
+
+	bindDN := "cn=alice,cn=users,dc=example,dc=com"
+	code, _ := h.Bind(bindDN, "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN:       bindDN,
+		Scope:        ldap.ScopeBaseObject,
+		DerefAliases: ldap.NeverDerefAliases,
+		Filter:       "(objectClass=user)",
+		Attributes:   []string{"uid", "cn", "mail", "jpegPhoto"},
+		Controls:     []ldap.Control{},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1)
+
+	entry := res.Entries[0]
+	assert.Equal(t, bindDN, entry.DN)
+	jpegPhotoAttr := entry.GetAttributeValue("jpegPhoto")
+	assert.Equal(t, "https://example.com/avatars/alice.jpg", jpegPhotoAttr, "user-bound entry should have jpegPhoto from userinfo picture")
 }
