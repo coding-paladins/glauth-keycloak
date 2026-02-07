@@ -173,6 +173,127 @@ func TestGroupPathToCN(t *testing.T) {
 	}
 }
 
+func TestExtractMemberOfNamesFilterCompileError(t *testing.T) {
+	names := extractMemberOfNames("(invalid", "groups")
+	assert.Nil(t, names)
+}
+
+func TestExtractMemberOfNamesNotBranch(t *testing.T) {
+	// (!(memberOf=cn=x,cn=groups,dc=example,dc=com)) — Not wraps Equality
+	names := extractMemberOfNames("(!(memberOf=cn=x,cn=groups,dc=example,dc=com))", "groups")
+	assert.Len(t, names, 1)
+	assert.Equal(t, "x", names[0])
+}
+
+func TestExtractMemberOfNamesEqualityNotMemberOf(t *testing.T) {
+	// (cn=foo) — not memberOf, should not add to names
+	names := extractMemberOfNames("(cn=foo)", "groups")
+	assert.Empty(t, names)
+}
+
+func TestExtractMemberOfNamesValueDoesNotContainDN(t *testing.T) {
+	names := extractMemberOfNames("(memberOf=cn=other,ou=roles,dc=example,dc=com)", "groups")
+	assert.Empty(t, names)
+}
+
+func TestExtractMemberOfNamesDuplicateCNSeenOnce(t *testing.T) {
+	filter := "(|(memberOf=cn=dup,cn=groups,dc=example,dc=com)(memberOf=cn=dup,cn=groups,dc=example,dc=com))"
+	names := extractMemberOfNames(filter, "groups")
+	assert.Len(t, names, 1)
+	assert.Equal(t, "dup", names[0])
+}
+
+func TestExtractMemberOfNamesFirstRDNNoCN(t *testing.T) {
+	// DN with first RDN not cn (e.g. uid=x) — parsed but no cn in first RDN
+	names := extractMemberOfNames("(memberOf=uid=user,cn=groups,dc=example,dc=com)", "groups")
+	assert.Empty(t, names)
+}
+
+func TestParseFirstCNValueFromBindDNWithSuffixLengthMismatch(t *testing.T) {
+	got, ok := parseFirstCNValueFromBindDNWithSuffix("cn=short", ",cn=bind,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseFirstCNValueFromBindDNWithSuffixSuffixMismatch(t *testing.T) {
+	got, ok := parseFirstCNValueFromBindDNWithSuffix("cn=client,ou=other,dc=example,dc=com", ",cn=bind,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseFirstCNValueFromBindDNWithSuffixRDNCountMismatch(t *testing.T) {
+	// bindDN has different number of RDNs than suffix+1
+	got, ok := parseFirstCNValueFromBindDNWithSuffix("cn=a,cn=bind,dc=example,dc=com", ",cn=bind,dc=example,dc=com")
+	require.True(t, ok)
+	assert.Equal(t, "a", got)
+	got, ok = parseFirstCNValueFromBindDNWithSuffix("cn=a,cn=b,cn=bind,dc=example,dc=com", ",cn=bind,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseFirstCNValueFromBindDNWithSuffixRDNMismatch(t *testing.T) {
+	// Same length but RDN type/value differs: ou=bind vs cn=bind
+	got, ok := parseFirstCNValueFromBindDNWithSuffix("cn=client,ou=bind,dc=example,dc=com", ",cn=bind,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseCommonNameFromDNInvalidDN(t *testing.T) {
+	got, ok := parseCommonNameFromDN("not a valid dn")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseCommonNameFromDNNoCNInFirstRDN(t *testing.T) {
+	got, ok := parseCommonNameFromDN("uid=user,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestParseCommonNameFromDNEmptyCN(t *testing.T) {
+	got, ok := parseCommonNameFromDN("cn=,dc=example,dc=com")
+	assert.False(t, ok)
+	assert.Empty(t, got)
+}
+
+func TestEscapeRDNValueLeadingSpace(t *testing.T) {
+	got := escapeRDNValue(" x")
+	assert.Equal(t, "\\ x", got)
+}
+
+func TestEscapeRDNValueTrailingSpace(t *testing.T) {
+	got := escapeRDNValue("x ")
+	assert.Equal(t, "x\\ ", got)
+}
+
+func TestEscapeRDNValueMiddleSpace(t *testing.T) {
+	got := escapeRDNValue("a b")
+	assert.Equal(t, "a b", got)
+}
+
+func TestEscapeRDNValueSpecialCharacters(t *testing.T) {
+	got := escapeRDNValue(`cn=#+;<=>"\`)
+	assert.Contains(t, got, `\#`)
+	assert.Contains(t, got, `\+`)
+	assert.Contains(t, got, `\;`)
+	assert.Contains(t, got, `\<`)
+	assert.Contains(t, got, `\>`)
+	assert.Contains(t, got, `\=`)
+	assert.Contains(t, got, `\"`)
+	assert.Contains(t, got, `\\`)
+}
+
+func TestSidToStringInvalidLength(t *testing.T) {
+	got := sidToString([]byte{1, 5, 0, 0, 0, 0, 0, 0})
+	assert.Empty(t, got)
+}
+
+func TestSidToStringSubAuthCountNegative(t *testing.T) {
+	// b[1] = 255 interpreted as n; len(b) < 8+4*n
+	got := sidToString([]byte{1, 255, 0, 0, 0, 0, 0, 0})
+	assert.Empty(t, got)
+}
+
 func TestRealmRolesFromUserinfo(t *testing.T) {
 	t.Run("nil_info_returns_nil", func(t *testing.T) {
 		got := realmRolesFromUserinfo(nil)

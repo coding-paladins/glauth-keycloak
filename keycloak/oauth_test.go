@@ -125,6 +125,51 @@ func TestPasswordGrantEmptyAccessToken(t *testing.T) {
 	assert.Nil(t, token)
 }
 
+func TestPasswordGrantWithCustomHTTPClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "tok", "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	token, err := passwordGrant(&nopLogger, server.URL, "c", "s", "u", "p", client)
+	require.NoError(t, err)
+	assert.NotNil(t, token)
+}
+
+func TestPasswordGrantExpiresInZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "tok", "token_type": "Bearer", "expires_in": 0,
+		})
+	}))
+	defer server.Close()
+
+	token, err := passwordGrant(&nopLogger, server.URL, "c", "s", "u", "p", nil)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.True(t, token.Expiry.IsZero(), "expires_in 0 should not set Expiry")
+}
+
+func TestClientCredentialsGrantWithCustomHTTPClient(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token": "tok", "token_type": "Bearer", "expires_in": 3600,
+		})
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	token, err := clientCredentialsGrant(&nopLogger, server.URL, "c", "s", client)
+	require.NoError(t, err)
+	assert.NotNil(t, token)
+}
+
 func TestBug7_OAuth2NoContextTimeout(t *testing.T) {
 	// Create a server that hangs for longer than our timeout
 	hangingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

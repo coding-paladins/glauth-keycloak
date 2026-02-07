@@ -138,6 +138,66 @@ func TestCloseSuccess(t *testing.T) {
 	assert.False(t, exists, "Session should be deleted")
 }
 
+func TestCloseSuccessWithConnDeletesFromConnToKey(t *testing.T) {
+	conn, connOther := net.Pipe()
+	defer conn.Close()
+	defer connOther.Close()
+
+	boundDN := "cn=svc,cn=bind,dc=example,dc=com"
+	sess := &session{boundDN: &boundDN, token: &oauth2.Token{AccessToken: "x"}, lastActivity: time.Now()}
+	key := "conn-1"
+	h := &keycloakHandler{
+		sessions:  map[string]*session{key: sess},
+		connToKey: map[net.Conn]string{conn: key},
+		log:       &nopLogger,
+	}
+	err := h.Close(boundDN, conn)
+	require.NoError(t, err)
+	h.sessionsMu.RLock()
+	_, exists := h.sessions[key]
+	h.sessionsMu.RUnlock()
+	assert.False(t, exists, "Session should be deleted")
+	_, inMap := h.connToKey[conn]
+	assert.False(t, inMap, "conn should be removed from connToKey")
+}
+
+func TestCheckSessionNilSession(t *testing.T) {
+	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
+	h := &keycloakHandler{config: config, log: &nopLogger}
+	err := h.checkSession(nil, "cn=alice,cn=users,dc=example,dc=com", false, h.config.tokenEndpoint())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no session")
+}
+
+func TestCheckSessionNilToken(t *testing.T) {
+	boundDN := "cn=alice,cn=users,dc=example,dc=com"
+	h := &keycloakHandler{
+		config:   makeHandlerConfigFromURL(t, "http://127.0.0.1:8443"),
+		sessions: map[string]*session{"default": {boundDN: &boundDN, token: nil}},
+		log:      &nopLogger,
+	}
+	err := h.checkSession(h.getSession(nil), boundDN, false, h.config.tokenEndpoint())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no session token")
+}
+
+func TestCloseSessionKeyEmptyReturnsNil(t *testing.T) {
+	conn, connOther := net.Pipe()
+	defer conn.Close()
+	defer connOther.Close()
+	boundDN := "cn=svc,cn=bind,dc=example,dc=com"
+	sess := &session{boundDN: &boundDN, token: &oauth2.Token{AccessToken: "x"}, lastActivity: time.Now()}
+	h := &keycloakHandler{
+		sessions:  map[string]*session{"": sess},
+		connToKey: map[net.Conn]string{conn: ""},
+		log:       &nopLogger,
+	}
+	err := h.Close(boundDN, conn)
+	require.NoError(t, err)
+	_, stillExists := h.sessions[""]
+	assert.True(t, stillExists, "empty key session is not deleted")
+}
+
 func TestCloseSessionError(t *testing.T) {
 	// Session must have lastActivity set so it is not removed by cleanStaleSessionsLocked before checkSession.
 	boundDN := "cn=bob,cn=users,dc=example,dc=com"

@@ -166,6 +166,45 @@ func TestGetSessionConnNotInMapReturnsNil(t *testing.T) {
 	assert.Nil(t, got, "Unknown connection should return nil session")
 }
 
+func TestGetSessionSessionsNilReturnsNil(t *testing.T) {
+	h := &keycloakHandler{
+		sessions:  nil,
+		connToKey: make(map[net.Conn]string),
+		log:       &nopLogger,
+	}
+	got := h.getSession(nil)
+	assert.Nil(t, got)
+}
+
+func TestGetOrCreateSessionInitializesSessionsWhenNil(t *testing.T) {
+	h := &keycloakHandler{
+		sessions:  nil,
+		connToKey: make(map[net.Conn]string),
+		log:       &nopLogger,
+	}
+	sess := h.getOrCreateSession(nil)
+	require.NotNil(t, sess)
+	require.NotNil(t, h.sessions)
+	_, ok := h.sessions["default"]
+	assert.True(t, ok)
+}
+
+func TestSessionRefreshMissingClientCredentials(t *testing.T) {
+	s := &session{
+		boundDN:     strPtr("cn=svc,cn=bind,dc=example,dc=com"),
+		token:       &oauth2.Token{AccessToken: "x", Expiry: time.Now().Add(-time.Hour)},
+		isUserBound: false,
+		clientID:    "",
+		clientSecret: "",
+	}
+	err := s.refresh(&nopLogger, "http://127.0.0.1/token", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot refresh")
+	assert.Contains(t, err.Error(), "missing client credentials")
+}
+
+func strPtr(s string) *string { return &s }
+
 func TestCloseConnNotInMapGracefullyHandles(t *testing.T) {
 	boundDN := "cn=alice,cn=users,dc=example,dc=com"
 	sess := &session{boundDN: &boundDN, token: &oauth2.Token{AccessToken: "x"}, isUserBound: true}

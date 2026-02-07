@@ -1,7 +1,12 @@
 package keycloak
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"encoding/json"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/glauth/glauth/v2/pkg/handler"
 	"github.com/glauth/ldap"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -432,4 +439,172 @@ func TestBugConfirm_UserinfoEmptyPreferredNameAndSub_Rejected(t *testing.T) {
 	_, err := h.keycloakUserinfo(sess)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "missing preferred_username and sub")
+}
+
+func TestDoJSONGetNilConfig(t *testing.T) {
+	h := makeHandlerWithConfig(makeHandlerConfigFromURL(t, "http://127.0.0.1:8443"))
+	h.config = nil
+	sess := h.getSession(nil)
+	sess.token = &oauth2.Token{AccessToken: "x"}
+	var result []User
+	err := h.doJSONGet(sess, "http://127.0.0.1/users", "test", &result)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "handler config is nil")
+}
+
+func TestDoJSONGetNilHTTPClient(t *testing.T) {
+	h := makeHandlerWithConfig(makeHandlerConfigFromURL(t, "http://127.0.0.1:8443"))
+	h.httpClient = nil
+	sess := h.getSession(nil)
+	sess.token = &oauth2.Token{AccessToken: "x"}
+	var result []User
+	err := h.doJSONGet(sess, "http://127.0.0.1/users", "test", &result)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTP client is nil")
+}
+
+func TestDoJSONGetNilSessionToken(t *testing.T) {
+	h := makeHandlerWithConfig(makeHandlerConfigFromURL(t, "http://127.0.0.1:8443"))
+	sess := h.getSession(nil)
+	sess.token = nil
+	var result []User
+	err := h.doJSONGet(sess, "http://127.0.0.1/users", "test", &result)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no session token")
+}
+
+func TestNewKeycloakHandlerConfigWithScheme(t *testing.T) {
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	os.Setenv("KEYCLOAK_SCHEME", "http")
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+		os.Unsetenv("KEYCLOAK_SCHEME")
+	}()
+
+	config, err := newKeycloakHandlerConfig(&nopLogger)
+	require.NoError(t, err)
+	assert.Equal(t, "http", config.keycloakScheme)
+	assert.Contains(t, config.userinfoEndpointURL, "http://")
+}
+
+func TestNewKeycloakHandlerConfigInsecureSkipVerifyYes(t *testing.T) {
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	os.Setenv("KEYCLOAK_INSECURE_SKIP_VERIFY", "yes")
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+		os.Unsetenv("KEYCLOAK_INSECURE_SKIP_VERIFY")
+	}()
+
+	config, err := newKeycloakHandlerConfig(&nopLogger)
+	require.NoError(t, err)
+	assert.True(t, config.keycloakInsecureSkipVerify)
+}
+
+func TestNewKeycloakHandlerReturnsNilWhenCAFileNotFound(t *testing.T) {
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	os.Setenv("KEYCLOAK_CA_FILE", "/nonexistent/ca.pem")
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+		os.Unsetenv("KEYCLOAK_CA_FILE")
+	}()
+
+	h := NewKeycloakHandler()
+	assert.Nil(t, h)
+}
+
+func TestNewKeycloakHandlerReturnsNilWhenCAFileInvalidPEM(t *testing.T) {
+	tmp := t.TempDir()
+	caFile := tmp + "/ca.pem"
+	require.NoError(t, os.WriteFile(caFile, []byte("not a certificate"), 0600))
+
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	os.Setenv("KEYCLOAK_CA_FILE", caFile)
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+		os.Unsetenv("KEYCLOAK_CA_FILE")
+	}()
+
+	h := NewKeycloakHandler()
+	assert.Nil(t, h)
+}
+
+func TestNewKeycloakHandlerWithValidCAFile(t *testing.T) {
+	// Create a minimal self-signed cert PEM so newTLSConfig hits AppendCertsFromPEM success path.
+	key, err := rsa.GenerateKey(rand.Reader, 512)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	tmp := t.TempDir()
+	caFile := tmp + "/ca.pem"
+	require.NoError(t, os.WriteFile(caFile, certPEM, 0600))
+
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	os.Setenv("KEYCLOAK_CA_FILE", caFile)
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+		os.Unsetenv("KEYCLOAK_CA_FILE")
+	}()
+
+	h := NewKeycloakHandler()
+	require.NotNil(t, h)
+	kh := h.(*keycloakHandler)
+	require.NotNil(t, kh.httpClient)
+}
+
+func TestNewKeycloakHandlerWithGLAuthLogger(t *testing.T) {
+	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
+	os.Setenv("KEYCLOAK_PORT", "8443")
+	os.Setenv("KEYCLOAK_REALM", "test")
+	os.Setenv("LDAP_DOMAIN", "example.com")
+	defer func() {
+		os.Unsetenv("KEYCLOAK_HOSTNAME")
+		os.Unsetenv("KEYCLOAK_PORT")
+		os.Unsetenv("KEYCLOAK_REALM")
+		os.Unsetenv("LDAP_DOMAIN")
+	}()
+
+	log := zerolog.Nop()
+	h := NewKeycloakHandler(handler.Logger(&log))
+	require.NotNil(t, h)
+	kh := h.(*keycloakHandler)
+	require.NotNil(t, kh.log)
 }

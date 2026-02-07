@@ -593,6 +593,136 @@ func TestSearchUserBoundScopeSingleLevel(t *testing.T) {
 	require.Len(t, res.Entries, 0)
 }
 
+func TestSearchUserBoundScopeSingleLevelWithBaseUsers(t *testing.T) {
+	// User-bound search with BaseDN cn=users and Scope SingleLevel exercises filterEntriesForRequest SingleLevel branch.
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/userinfo" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=alice,cn=users,dc=example,dc=com", "pass", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeSingleLevel, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1, "single-level scope under cn=users should return bound user entry")
+	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
+}
+
+func TestValidateSearchRequestConstraintsSuccess(t *testing.T) {
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree,
+		DerefAliases: ldap.NeverDerefAliases, SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+	}
+	err := validateSearchRequestConstraints(req)
+	assert.NoError(t, err)
+}
+
+func TestIsSingleLevelScopeMatchInvalidEntryDN(t *testing.T) {
+	assert.False(t, isSingleLevelScopeMatch("not a valid dn", "cn=users,dc=example,dc=com"))
+}
+
+func TestIsSingleLevelScopeMatchInvalidBaseDN(t *testing.T) {
+	assert.False(t, isSingleLevelScopeMatch("cn=alice,cn=users,dc=example,dc=com", "invalid base"))
+}
+
+func TestIsSingleLevelScopeMatchRDNCountMismatch(t *testing.T) {
+	// Entry must have exactly base+1 RDN; same depth as base returns false
+	assert.False(t, isSingleLevelScopeMatch("cn=users,dc=example,dc=com", "cn=users,dc=example,dc=com"))
+}
+
+func TestIsSingleLevelScopeMatchRDNMismatch(t *testing.T) {
+	// Entry under different base (ou=other vs cn=users)
+	assert.False(t, isSingleLevelScopeMatch("cn=alice,ou=other,dc=example,dc=com", "cn=users,dc=example,dc=com"))
+}
+
+func TestFilterEntriesForRequestUnsupportedScope(t *testing.T) {
+	entry := &ldap.Entry{DN: "cn=alice,cn=users,dc=example,dc=com", Attributes: []*ldap.EntryAttribute{}}
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: 99, Filter: "(objectClass=user)",
+	}
+	filtered, err := filterEntriesForRequest(req, []*ldap.Entry{entry})
+	require.NoError(t, err)
+	assert.Empty(t, filtered, "unsupported scope should exclude entry")
+}
+
+func TestFilterEntriesForRequestSizeLimit(t *testing.T) {
+	entries := []*ldap.Entry{
+		{DN: "cn=alice,cn=users,dc=example,dc=com", Attributes: []*ldap.EntryAttribute{{Name: "objectClass", Values: []string{"user"}}}},
+		{DN: "cn=bob,cn=users,dc=example,dc=com", Attributes: []*ldap.EntryAttribute{{Name: "objectClass", Values: []string{"user"}}}},
+	}
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, SizeLimit: 1, Filter: "(objectClass=user)",
+	}
+	filtered, err := filterEntriesForRequest(req, entries)
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", filtered[0].DN)
+}
+
+func TestBuildMemberOfValuesSkipsEmptyName(t *testing.T) {
+	values := buildMemberOfValues([]string{"a", "", "b"}, "cn=groups,dc=example,dc=com")
+	require.Len(t, values, 2)
+	assert.Contains(t, values, "cn=a,cn=groups,dc=example,dc=com")
+	assert.Contains(t, values, "cn=b,cn=groups,dc=example,dc=com")
+}
+
+func TestMemberOfValuesFromSetSkipsEmptyName(t *testing.T) {
+	values := memberOfValuesFromSet(map[string]bool{"r1": true, "": true}, "ou=roles,dc=example,dc=com")
+	require.Len(t, values, 1)
+	assert.Equal(t, "cn=r1,ou=roles,dc=example,dc=com", values[0])
+}
+
+func TestSearchFilterCompileFails(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{{Username: "alice"}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: "(invalid", Attributes: attributes9, Controls: []ldap.Control{},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.Error(t, err)
+	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
+}
+
 func TestSearchWithUnknownControlType(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1131,6 +1261,46 @@ func TestSearchMemberOfRolesUsesRoleNameInAPIPath(t *testing.T) {
 	require.Equal(t, "/admin/realms/test/roles/jellyfin-users/users", rolesUsersPathReceived,
 		"Keycloak roles endpoint expects role name in path (roles/{role-name}/users), not role ID; got path %q", rolesUsersPathReceived)
 	require.Len(t, res.Entries, 1)
+	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
+}
+
+func TestSearchMemberOfRolesOneRoleFailsContinues(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/roles/good-role/users") && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{
+				{ID: "u1", Username: "alice", FirstName: "A", LastName: "B", Email: "a@b.com"},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/roles/bad-role/users") && r.Method == "GET" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	filter := "(|(memberOf=cn=bad-role,ou=roles,dc=example,dc=com)(memberOf=cn=good-role,ou=roles,dc=example,dc=com))"
+	req := ldap.SearchRequest{
+		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: filter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1, "should return users from good-role despite bad-role failing")
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
 }
 
