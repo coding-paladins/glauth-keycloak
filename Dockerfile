@@ -6,8 +6,9 @@ RUN git clone --depth 1 --branch v2.4.0 https://github.com/glauth/glauth.git gla
     rm -f glauth-repo/go.work && \
     mkdir -p glauth-repo/v2/pkg/plugins/glauth-keycloak
 
-COPY keycloak.go glauth-repo/v2/pkg/plugins/glauth-keycloak/
-RUN echo '' >> glauth-repo/v2/pkg/plugins/glauth-keycloak/keycloak.go && \
+COPY keycloak/*.go glauth-repo/v2/pkg/plugins/glauth-keycloak/
+RUN sed -i 's/package keycloak/package main/g' glauth-repo/v2/pkg/plugins/glauth-keycloak/*.go && \
+    echo '' >> glauth-repo/v2/pkg/plugins/glauth-keycloak/keycloak.go && \
     echo 'func main() {}' >> glauth-repo/v2/pkg/plugins/glauth-keycloak/keycloak.go
 
 # Single module at repo root so replace github.com/glauth/glauth => ... contains v2/pkg/embed
@@ -21,7 +22,7 @@ RUN echo 'replace github.com/glauth/glauth => /build/glauth-repo' >> go.mod && \
     echo 'replace github.com/glauth/glauth/v2 => /build/glauth-repo' >> go.mod
 
 ENV GOWORK=off GONOPROXY=github.com/glauth GONOSUMDB=github.com/glauth
-RUN go get github.com/go-resty/resty/v2@v2.11.0 golang.org/x/oauth2@v0.18.0 && \
+RUN go get github.com/go-ldap/ldap/v3@v3.4.6 github.com/go-resty/resty/v2@v2.11.0 golang.org/x/oauth2@v0.18.0 && \
     go mod tidy && go mod download && \
     go build -o /build/glauth ./v2 && \
     go build -buildmode=plugin -o /build/keycloak.so ./v2/pkg/plugins/glauth-keycloak

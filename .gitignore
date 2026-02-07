@@ -83,5 +83,6 @@ Desktop.ini
 # Linux specific
 .directory
 .Trash-*
-.go-install/
+.go-install/*
+.gomodcache/*
 kubeconfig

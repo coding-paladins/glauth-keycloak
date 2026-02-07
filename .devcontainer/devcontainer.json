@@ -8,7 +8,7 @@
     "source=${localEnv:HOME}/.ssh,target=/tmp/host-ssh,type=bind,readonly"
   ],
   "containerEnv": {
-    "KUBECONFIG": "/workspace/glauth-keycloak/kubeconfig"
+    "KUBECONFIG": "/workspaces/glauth-keycloak/kubeconfig"
   },
   "customizations": {
     "vscode": {

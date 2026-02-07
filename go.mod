@@ -5,20 +5,22 @@ go 1.21
 require (
 	github.com/glauth/glauth/v2 v2.4.0
 	github.com/glauth/ldap v0.0.0-20240419171521-1f14f5c1b4ad
-	github.com/go-resty/resty/v2 v2.11.0
+	github.com/go-asn1-ber/asn1-ber v1.5.5
+	github.com/go-ldap/ldap/v3 v3.4.6
 	github.com/rs/zerolog v1.31.0
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/oauth2 v0.18.0
 )
 
 require (
+	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358 // indirect
 	github.com/GeertJohan/yubigo v0.0.0-20190917122436-175bc097e60e // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/go-asn1-ber/asn1-ber v1.5.5 // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/google/uuid v1.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
