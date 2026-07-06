@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -74,7 +73,7 @@ func TestGetenv(t *testing.T) {
 
 func TestNewKeycloakHandlerMissingEnv(t *testing.T) {
 	oldEnv := make(map[string]string)
-	for _, k := range []string{"KEYCLOAK_HOSTNAME", "KEYCLOAK_PORT", "KEYCLOAK_REALM", "LDAP_DOMAIN"} {
+	for _, k := range []string{"KEYCLOAK_HOSTNAME", "KEYCLOAK_PORT", "KEYCLOAK_REALM", "LDAP_DOMAIN", "KEYCLOAK_LDAP_CLIENT_ID", "KEYCLOAK_LDAP_CLIENT_SECRET"} {
 		oldEnv[k] = os.Getenv(k)
 		os.Unsetenv(k)
 	}
@@ -92,6 +91,7 @@ func TestNewKeycloakHandlerMissingEnv(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerSuccess(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "myrealm")
@@ -126,6 +126,7 @@ func TestNewKeycloakHandlerConfigInvalidPort(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerConfigVsphereDomainTrailingDot(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "r")
@@ -143,6 +144,7 @@ func TestNewKeycloakHandlerConfigVsphereDomainTrailingDot(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerConfigDefaultPort(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Unsetenv("KEYCLOAK_PORT")
 	os.Setenv("KEYCLOAK_REALM", "r")
@@ -159,12 +161,7 @@ func TestNewKeycloakHandlerConfigDefaultPort(t *testing.T) {
 }
 
 func TestKeycloakUserinfoConnectionFails(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer tokenServer.Close()
@@ -174,15 +171,19 @@ func TestKeycloakUserinfoConnectionFails(t *testing.T) {
 	closedServer.Close()
 	config.userinfoEndpointURL = closedServer.URL + "/userinfo"
 	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=alice,cn=users,dc=example,dc=com", "pass", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+	boundDN := "cn=alice,cn=users,dc=example,dc=com"
+	h.sessions["default"] = &session{
+		boundDN:     &boundDN,
+		token:       &oauth2.Token{AccessToken: "tok"},
+		isUserBound: true,
+	}
 
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
 		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	res, err := h.Search(boundDN, req, nil)
 	assert.Error(t, err)
 	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
 }
@@ -204,12 +205,7 @@ func TestNewKeycloakHandlerConfigMissingRealm(t *testing.T) {
 }
 
 func TestKeycloakGetNon200ReturnsErrorAndLogsBody(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.WriteHeader(http.StatusForbidden)
 			w.Header().Set("Content-Type", "application/json")
@@ -243,6 +239,7 @@ func TestBug11_VsphereDomainValidation(t *testing.T) {
 
 	for _, invalidDomain := range testCases {
 		t.Run("invalid_"+invalidDomain, func(t *testing.T) {
+			setRequiredKeycloakEnv(t)
 			os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 			os.Setenv("KEYCLOAK_PORT", "8443")
 			os.Setenv("KEYCLOAK_REALM", "test")
@@ -347,13 +344,8 @@ func TestBugReview_KeycloakGetAcceptsOversizedResponse(t *testing.T) {
 	}
 	payload = append(payload, ']')
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if (r.URL.Path == "/admin/realms/test/users" || r.URL.Path == "/admin/realms/test/groups") && r.Method == "GET" {
+	server := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(payload)
@@ -474,6 +466,7 @@ func TestDoJSONGetNilSessionToken(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerConfigWithScheme(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -494,6 +487,7 @@ func TestNewKeycloakHandlerConfigWithScheme(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerConfigInsecureSkipVerifyYes(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -513,6 +507,7 @@ func TestNewKeycloakHandlerConfigInsecureSkipVerifyYes(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerReturnsNilWhenCAFileNotFound(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -535,6 +530,7 @@ func TestNewKeycloakHandlerReturnsNilWhenCAFileInvalidPEM(t *testing.T) {
 	caFile := tmp + "/ca.pem"
 	require.NoError(t, os.WriteFile(caFile, []byte("not a certificate"), 0600))
 
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -571,6 +567,7 @@ func TestNewKeycloakHandlerWithValidCAFile(t *testing.T) {
 	caFile := tmp + "/ca.pem"
 	require.NoError(t, os.WriteFile(caFile, certPEM, 0600))
 
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")
@@ -591,6 +588,7 @@ func TestNewKeycloakHandlerWithValidCAFile(t *testing.T) {
 }
 
 func TestNewKeycloakHandlerWithGLAuthLogger(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")

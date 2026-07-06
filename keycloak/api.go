@@ -8,11 +8,6 @@ import (
 	"net/http"
 )
 
-type Group struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
 type User struct {
 	Email      string              `json:"email"`
 	FirstName  string              `json:"firstName"`
@@ -36,14 +31,6 @@ type userinfoResponse struct {
 
 func (h *keycloakHandler) keycloakUsersPath() string {
 	return "users"
-}
-
-func (h *keycloakHandler) keycloakGroupsPath() string {
-	return "groups"
-}
-
-func (h *keycloakHandler) keycloakGroupMembersPath(groupID string) string {
-	return fmt.Sprintf("groups/%s/members", groupID)
 }
 
 func (h *keycloakHandler) keycloakGet(

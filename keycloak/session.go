@@ -180,11 +180,12 @@ func (s *session) refresh(log *zerolog.Logger, tokenEndpoint string, httpClient 
 	return nil
 }
 
-func (s *session) openUser(bindDN string, token *oauth2.Token) {
+func (s *session) openUser(bindDN string, token *oauth2.Token, clientRoleCNs []string) {
 	s.boundDN = &bindDN
 	s.token = token
 	s.isUserBound = true
 	s.clientID = ""
 	s.clientSecret = ""
+	s.clientRoleCNs = clientRoleCNs
 	s.lastActivity = time.Now()
 }

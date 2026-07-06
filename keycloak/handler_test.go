@@ -85,16 +85,7 @@ func TestBindServiceAccountTokenFails(t *testing.T) {
 }
 
 func TestBindUserSuccess(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.NoError(t, r.ParseForm())
-		assert.Equal(t, "password", r.Form.Get("grant_type"))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"access_token": "user-token",
-			"token_type":   "Bearer",
-			"expires_in":   3600,
-		})
-	}))
+	tokenServer := httptest.NewServer(withTestAuthForUser("ldap-client", "client-uuid", "alice", []string{"user"}, nil))
 	defer tokenServer.Close()
 
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
@@ -103,6 +94,7 @@ func TestBindUserSuccess(t *testing.T) {
 	require.NoError(t, err)
 	assert.EqualValues(t, ldap.LDAPResultSuccess, code)
 	assert.True(t, h.getSession(nil).isUserBound)
+	assert.Equal(t, []string{"ldap-client-user"}, h.getSession(nil).clientRoleCNs)
 }
 
 func TestBindUserInvalidBindDN(t *testing.T) {
@@ -247,30 +239,8 @@ func TestFindUser(t *testing.T) {
 	assert.Contains(t, err.Error(), "FindUser")
 }
 
-func TestFindGroup(t *testing.T) {
-	config := makeHandlerConfigFromURL(t, "http://127.0.0.1:8443")
-	h := makeHandlerWithConfig(config)
-	ok, group, err := h.FindGroup(context.Background(), "admins")
-	assert.False(t, ok)
-	assert.Empty(t, group.Name)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "FindGroup")
-}
-
 func TestServiceAccountBindClearsUserBoundSessionState(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			assert.NoError(t, r.ParseForm())
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"access_token": "tok",
-				"token_type":   "Bearer",
-				"expires_in":   3600,
-			})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
+	tokenServer := httptest.NewServer(withTestAuthForUser("ldap-client", "client-uuid", "alice", []string{"user"}, nil))
 	defer tokenServer.Close()
 
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
@@ -306,12 +276,7 @@ func TestBug4_EmptyUsernameAccepted(t *testing.T) {
 }
 
 func TestBug5_FirstNamePrefixNotChecked(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			// User with FirstName matching prefix but Username and LastName not matching
@@ -374,15 +339,10 @@ func TestBug6_InitErrorReturnsEmptyHandler(t *testing.T) {
 }
 
 func TestBugConfirm_UserBoundSearchBaseDNCaseInsensitive(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -408,48 +368,8 @@ func TestBugConfirm_UserBoundSearchBaseDNCaseInsensitive(t *testing.T) {
 	require.Len(t, res.Entries, 1, "BaseDN comparison should be case-insensitive")
 }
 
-func TestBugConfirm_GroupPrefixSearchCaseInsensitive(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{{ID: "g1", Name: "admins"}})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	// Filter with uppercase prefix "ADMIN" (group name from Keycloak is "admins").
-	req := ldap.SearchRequest{
-		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=group)(|(sAMAccountName=ADMIN*)(cn=ADMIN*)))",
-		Attributes: attributes3,
-		Controls:   []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "group prefix search should be case-insensitive (ADMIN* matches admins)")
-}
-
 func TestBugConfirm_ServiceAccountSearchBaseDNCaseInsensitive(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{{Username: "alice", FirstName: "A", LastName: "B", Email: "a@b.com"}})

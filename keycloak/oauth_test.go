@@ -289,6 +289,7 @@ func TestBug16_HardcodedTimeouts(t *testing.T) {
 	os.Setenv("HTTP_CLIENT_TIMEOUT", "5s")
 	defer os.Unsetenv("HTTP_CLIENT_TIMEOUT")
 
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "test")

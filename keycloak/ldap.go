@@ -11,10 +11,15 @@ import (
 	ldapv3 "github.com/go-ldap/ldap/v3"
 )
 
-// extractMemberOfGroupNames parses an LDAP filter like (|(memberOf=cn=group1,cn=groups,dc=...)(memberOf=cn=group2,cn=groups,dc=...))
-// and returns the list of group names (cn values from clauses whose DN contains "groups").
-func extractMemberOfGroupNames(filter string) []string {
+// extractMemberOfRoleCNs parses memberOf filters and returns cn values under cn=groups,...
+// (e.g. jellyfin-admin from memberOf=cn=jellyfin-admin,cn=groups,dc=...).
+func extractMemberOfRoleCNs(filter string) []string {
 	return extractMemberOfNames(filter, "groups")
+}
+
+// extractMemberOfGroupNames is an alias for extractMemberOfRoleCNs.
+func extractMemberOfGroupNames(filter string) []string {
+	return extractMemberOfRoleCNs(filter)
 }
 
 func extractMemberOfNames(filter string, dnContains string) []string {
@@ -70,18 +75,6 @@ func extractMemberOfNames(filter string, dnContains string) []string {
 	}
 	walk(filterPacket)
 	return names
-}
-
-// groupPathToCN turns a Keycloak group path (e.g. "/admins" or "/parent/child") into an LDAP cn value (last segment).
-func groupPathToCN(path string) string {
-	path = strings.TrimPrefix(strings.TrimSpace(path), "/")
-	if path == "" {
-		return ""
-	}
-	if i := strings.LastIndex(path, "/"); i >= 0 {
-		path = path[i+1:]
-	}
-	return path
 }
 
 // parseFirstCNValueFromBindDNWithSuffix extracts the first RDN's cn value (unescaped) from bindDN
