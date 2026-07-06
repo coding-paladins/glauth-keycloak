@@ -18,7 +18,7 @@ import (
 func TestSessionOpenUser(t *testing.T) {
 	s := &session{}
 	token := &oauth2.Token{AccessToken: "test-token", Expiry: time.Now().Add(time.Hour)}
-	s.openUser("cn=alice,cn=users,dc=example,dc=com", token)
+	s.openUser("cn=alice,cn=users,dc=example,dc=com", token, []string{"ldap-client-user"})
 	assert.True(t, s.isUserBound)
 	require.NotNil(t, s.boundDN)
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", *s.boundDN)
@@ -235,6 +235,7 @@ func TestSessionKeyUnknownConnReturnsEmptyString(t *testing.T) {
 }
 
 func TestBug1_ConnToKeyNotInitialized(t *testing.T) {
+	setRequiredKeycloakEnv(t)
 	os.Setenv("KEYCLOAK_HOSTNAME", "kc.example.com")
 	os.Setenv("KEYCLOAK_PORT", "8443")
 	os.Setenv("KEYCLOAK_REALM", "myrealm")

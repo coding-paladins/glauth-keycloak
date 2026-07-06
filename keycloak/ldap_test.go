@@ -97,11 +97,6 @@ func TestBugReview_DNValuesNotEscaped(t *testing.T) {
 	// Unescaped "foo,bar" would be parsed as two RDNs; escaped form is "foo\,bar" (backslash before comma)
 	assert.NotContains(t, entry.DN, "foo,bar", "DN must not contain unescaped comma so it is not parsed as separate RDN")
 	assert.Contains(t, entry.DN, "foo\\,bar", "DN should contain escaped comma")
-
-	groupWithEquals := Group{ID: "g1", Name: "role=admin"}
-	groupEntry := groupToLDAPEntry(groupWithEquals, "cn=groups,dc=example,dc=com", ldapDomain)
-	require.NotNil(t, groupEntry)
-	assert.Contains(t, groupEntry.DN, `\=`, "DN should escape equals in group name")
 }
 
 func TestBugReview_SidToStringPanicsOnShortInput(t *testing.T) {
@@ -131,27 +126,6 @@ func TestBugConfirm_EscapeRDNValueControlCharacter(t *testing.T) {
 	got := escapeRDNValue(valueWithNul)
 	assert.Contains(t, got, "\\00", "control character NUL should be escaped as \\00")
 	assert.NotEqual(t, valueWithNul, got)
-}
-
-func TestGroupPathToCN(t *testing.T) {
-	tests := []struct {
-		path   string
-		expect string
-	}{
-		{"/admins", "admins"},
-		{"/parent/child", "child"},
-		{"", ""},
-		{"noslash", "noslash"},
-		{" /a ", "a"},
-		{"/single", "single"},
-		{"/a/b/c", "c"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
-			got := groupPathToCN(tt.path)
-			assert.Equal(t, tt.expect, got)
-		})
-	}
 }
 
 func TestExtractMemberOfNamesFilterCompileError(t *testing.T) {

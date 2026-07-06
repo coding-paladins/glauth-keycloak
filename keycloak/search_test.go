@@ -35,12 +35,7 @@ func TestSearchWrongBoundDN(t *testing.T) {
 }
 
 func TestSearchRootDSE(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer tokenServer.Close()
@@ -63,12 +58,7 @@ func TestSearchRootDSE(t *testing.T) {
 }
 
 func TestSearchUsers(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -98,12 +88,7 @@ func TestSearchUsers(t *testing.T) {
 }
 
 func TestJellyfinExactUserLookup(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -136,12 +121,7 @@ func TestJellyfinExactUserLookup(t *testing.T) {
 }
 
 func TestJellyfinExactUserLookupOrderAgnostic(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -172,12 +152,7 @@ func TestJellyfinExactUserLookupOrderAgnostic(t *testing.T) {
 }
 
 func TestSearchUsersWithPrefix(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -206,40 +181,6 @@ func TestSearchUsersWithPrefix(t *testing.T) {
 	assert.Len(t, res.Entries, 1)
 }
 
-func TestSearchGroups(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{{ID: "1", Name: "admins"}})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	req := ldap.SearchRequest{
-		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=group)(|(sAMAccountName=ad*)(cn=ad*)))",
-		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1)
-	assert.Equal(t, "cn=admins,cn=groups,dc=example,dc=com", res.Entries[0].DN)
-}
-
 func TestSearchUserBoundUserinfo(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
@@ -247,13 +188,9 @@ func TestSearchUserBoundUserinfo(t *testing.T) {
 		"given_name":         "Alice",
 		"family_name":        "A",
 		"email":              "alice@example.com",
+		"groups":             []string{"ldap-client-user"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -320,15 +257,10 @@ func TestSearchUnexpectedBaseDN(t *testing.T) {
 }
 
 func TestSearchUserBoundUserinfoPreferredNameFromSub(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"sub": "sub-id-only", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"sub": "sub-id-only", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -355,15 +287,10 @@ func TestSearchUserBoundUserinfoPreferredNameFromSub(t *testing.T) {
 }
 
 func TestSearchUserBoundBaseDNMismatch(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -388,15 +315,10 @@ func TestSearchUserBoundBaseDNMismatch(t *testing.T) {
 }
 
 func TestSearchUserBoundFilterNoMatch(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -421,12 +343,7 @@ func TestSearchUserBoundFilterNoMatch(t *testing.T) {
 }
 
 func TestSearchUserBoundUserinfoFails(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -438,26 +355,25 @@ func TestSearchUserBoundUserinfoFails(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
 	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
 	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=alice,cn=users,dc=example,dc=com", "pass", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+	boundDN := "cn=alice,cn=users,dc=example,dc=com"
+	h.sessions["default"] = &session{
+		boundDN:     &boundDN,
+		token:       &oauth2.Token{AccessToken: "tok"},
+		isUserBound: true,
+	}
 
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
 		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	res, err := h.Search(boundDN, req, nil)
 	assert.Error(t, err)
 	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
 }
 
 func TestSearchUsersKeycloakGetError(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -475,37 +391,6 @@ func TestSearchUsersKeycloakGetError(t *testing.T) {
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
 		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	assert.Error(t, err)
-	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
-}
-
-func TestSearchGroupsKeycloakGetError(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	req := ldap.SearchRequest{
-		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=group)(|(sAMAccountName=x*)(cn=x*)))",
-		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	assert.Error(t, err)
@@ -561,15 +446,10 @@ func TestSearchUnexpectedTypesOnly(t *testing.T) {
 }
 
 func TestSearchUserBoundScopeSingleLevel(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -595,15 +475,10 @@ func TestSearchUserBoundScopeSingleLevel(t *testing.T) {
 
 func TestSearchUserBoundScopeSingleLevelWithBaseUsers(t *testing.T) {
 	// User-bound search with BaseDN cn=users and Scope SingleLevel exercises filterEntriesForRequest SingleLevel branch.
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -695,12 +570,7 @@ func TestMemberOfValuesFromSetSkipsEmptyName(t *testing.T) {
 }
 
 func TestSearchFilterCompileFails(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{{Username: "alice"}})
@@ -749,15 +619,10 @@ func TestSearchWithUnknownControlType(t *testing.T) {
 }
 
 func TestSearchUserBoundScopeNotSupported(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"preferred_username": "alice", "sub": "x", "given_name": "A", "family_name": "B", "email": "a@b.com", "groups": []string{"ldap-client-user"}})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -782,12 +647,7 @@ func TestSearchUserBoundScopeNotSupported(t *testing.T) {
 }
 
 func TestSearchUserBoundUserinfoInvalidJSON(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte("not json"))
@@ -800,15 +660,19 @@ func TestSearchUserBoundUserinfoInvalidJSON(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
 	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
 	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=alice,cn=users,dc=example,dc=com", "pass", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+	boundDN := "cn=alice,cn=users,dc=example,dc=com"
+	h.sessions["default"] = &session{
+		boundDN:     &boundDN,
+		token:       &oauth2.Token{AccessToken: "tok"},
+		isUserBound: true,
+	}
 
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
 		Filter: "(objectClass=user)", Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	res, err := h.Search(boundDN, req, nil)
 	assert.Error(t, err)
 	assert.EqualValues(t, ldap.LDAPResultOperationsError, res.ResultCode)
 }
@@ -820,13 +684,9 @@ func TestUserBoundSearchWithBaseDNBoundDNReturnsEntry(t *testing.T) {
 		"given_name":         "Bob",
 		"family_name":        "B",
 		"email":              "bob@example.com",
+		"groups":             []string{"ldap-client-user"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -858,12 +718,7 @@ func TestUserBoundSearchWithBaseDNBoundDNReturnsEntry(t *testing.T) {
 }
 
 func TestSearchUsersWithPrefixNoMatch(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -893,12 +748,7 @@ func TestSearchUsersWithPrefixNoMatch(t *testing.T) {
 }
 
 func TestSearchUsersWithUserPrincipalNamePrefix(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -927,39 +777,6 @@ func TestSearchUsersWithUserPrincipalNamePrefix(t *testing.T) {
 	assert.Len(t, res.Entries, 1, "userPrincipalName prefix should match and return entry")
 }
 
-func TestSearchGroupsPrefixNoMatch(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{{ID: "1", Name: "admins"}})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	req := ldap.SearchRequest{
-		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter:     "(&(objectClass=group)(|(sAMAccountName=z*)(cn=z*)))",
-		Attributes: attributes3, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	assert.Empty(t, res.Entries)
-}
-
 func TestUserBoundEntryAttributesMatchBoundDN(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"preferred_username": "bob",
@@ -967,13 +784,9 @@ func TestUserBoundEntryAttributesMatchBoundDN(t *testing.T) {
 		"given_name":         "Bob",
 		"family_name":        "B",
 		"email":              "bob@example.com",
+		"groups":             []string{"ldap-client-user"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1009,12 +822,7 @@ func TestUserBoundEntryAttributesMatchBoundDN(t *testing.T) {
 }
 
 func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
@@ -1043,21 +851,15 @@ func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
 	assert.Len(t, res.Entries, 1, "prefix match should be case-insensitive")
 }
 
-func TestSearchUserBoundUserinfoWithGroups(t *testing.T) {
+func TestSearchUserBoundUserinfoWithClientRoles(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "alice",
 		"given_name":         "Alice",
 		"family_name":        "A",
 		"email":              "alice@example.com",
-		"groups":             []string{"/admins", "/parent/developers", "amp-admins"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuthForUser("ldap-client", "client-uuid", "alice", []string{"admin", "developer", "mod"}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1085,25 +887,21 @@ func TestSearchUserBoundUserinfoWithGroups(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	require.NotEmpty(t, memberOf, "memberOf should contain group DNs")
-	assert.Contains(t, memberOf, "cn=admins,cn=groups,dc=example,dc=com")
-	assert.Contains(t, memberOf, "cn=developers,cn=groups,dc=example,dc=com")
-	assert.Contains(t, memberOf, "cn=amp-admins,cn=groups,dc=example,dc=com")
+	require.NotEmpty(t, memberOf, "memberOf should contain client role DNs")
+	assert.Contains(t, memberOf, "cn=ldap-client-admin,cn=groups,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=ldap-client-developer,cn=groups,dc=example,dc=com")
+	assert.Contains(t, memberOf, "cn=ldap-client-mod,cn=groups,dc=example,dc=com")
 	assert.Len(t, memberOf, 3)
 }
 
-func TestSearchUserBoundUserinfoIgnoresRoles(t *testing.T) {
+func TestSearchUserBoundUserinfoIgnoresRealmRoles(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "bob",
 		"realm_access":       map[string]interface{}{"roles": []string{"viewer"}},
+		"groups":             []string{"ldap-client-user"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1130,21 +928,16 @@ func TestSearchUserBoundUserinfoIgnoresRoles(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	assert.Empty(t, memberOf, "roles in userinfo must not appear in memberOf")
+	assert.Equal(t, []string{"cn=ldap-client-user,cn=groups,dc=example,dc=com"}, memberOf,
+		"memberOf comes from Admin API client roles cached at bind, not userinfo groups claim")
 }
 
-func TestSearchUserBoundUserinfoWithGroupsOnly(t *testing.T) {
+func TestSearchUserBoundUserinfoWithClientRolesOnly(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "charlie",
-		"groups":             []string{"/team-a"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuthForUser("ldap-client", "client-uuid", "charlie", []string{"team-a"}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1171,21 +964,15 @@ func TestSearchUserBoundUserinfoWithGroupsOnly(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	assert.Equal(t, []string{"cn=team-a,cn=groups,dc=example,dc=com"}, memberOf)
+	assert.Equal(t, []string{"cn=ldap-client-team-a,cn=groups,dc=example,dc=com"}, memberOf)
 }
 
 func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "test",
-		"groups":             []string{"jellyfin-users", "jellyfin-admins"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuthForUser("jellyfin", "client-uuid", "test", []string{"user", "admin"}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1198,6 +985,7 @@ func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
 	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
 	config.ldapDomain = "societycell.local"
+	config.ldapClientID = "jellyfin"
 	h := makeHandlerWithConfig(config)
 
 	boundDN := "cn=test,cn=users,dc=societycell,dc=local"
@@ -1215,219 +1003,11 @@ func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	require.NotEmpty(t, memberOf, "memberOf required for filter (|(memberOf=cn=jellyfin-users,...)(memberOf=cn=jellyfin-admins,...))")
-	jellyfinUsersDN := "cn=jellyfin-users,cn=groups,dc=societycell,dc=local"
-	jellyfinAdminsDN := "cn=jellyfin-admins,cn=groups,dc=societycell,dc=local"
-	assert.Contains(t, memberOf, jellyfinUsersDN, "entry must have memberOf for jellyfin-users so Jellyfin-style filter matches")
-	assert.Contains(t, memberOf, jellyfinAdminsDN, "entry must have memberOf for jellyfin-admins so Jellyfin-style filter matches")
-}
-
-func TestSearchMemberOfGroupsUsesGroupMembersAPI(t *testing.T) {
-	var groupsPathReceived string
-	var membersPathReceived string
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			groupsPathReceived = r.URL.Path
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{
-				{ID: "group-1", Name: "jellyfin-users"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/group-1/members" && r.Method == "GET" {
-			membersPathReceived = r.URL.Path
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
-			})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	config.ldapDomain = "example.com"
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	memberOfGroupsFilter := "(|(memberOf=cn=jellyfin-users,cn=groups,dc=example,dc=com))"
-	req := ldap.SearchRequest{
-		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: memberOfGroupsFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-
-	require.Equal(t, "/admin/realms/test/groups", groupsPathReceived, "should list groups to resolve name to id")
-	require.Equal(t, "/admin/realms/test/groups/group-1/members", membersPathReceived, "should fetch group members")
-	require.Len(t, res.Entries, 1)
-	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
-}
-
-func TestSearchMemberOfGroupsWithGroupsBaseDN(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{
-				{ID: "group-1", Name: "manage-jellyfin"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/group-1/members" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-1", Username: "admin", FirstName: "Admin", LastName: "User", Email: "admin@example.com"},
-			})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	config.ldapDomain = "example.com"
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	adminFilter := "(memberOf=cn=manage-jellyfin,cn=groups,dc=example,dc=com)"
-	req := ldap.SearchRequest{
-		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: adminFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "admin search with baseDN=cn=groups should work (Jellyfin admin filter)")
-	assert.Equal(t, "cn=admin,cn=users,dc=example,dc=com", res.Entries[0].DN)
-}
-
-func TestSearchMemberOfGroupsOneGroupMembersFailsContinues(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{
-				{ID: "g-bad", Name: "bad-group"},
-				{ID: "g-good", Name: "good-group"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/g-good/members" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "u1", Username: "alice", FirstName: "A", LastName: "B", Email: "a@b.com"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/g-bad/members" && r.Method == "GET" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	filter := "(|(memberOf=cn=bad-group,cn=groups,dc=example,dc=com)(memberOf=cn=good-group,cn=groups,dc=example,dc=com))"
-	req := ldap.SearchRequest{
-		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: filter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "should return users from good-group despite one group members request failing")
-	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
-}
-
-func TestSearchMemberOfGroupsMultipleGroups(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Group{
-				{ID: "g1", Name: "watch-jellyfin"},
-				{ID: "g2", Name: "manage-jellyfin"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/g1/members" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/groups/g2/members" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-2", Username: "bob", FirstName: "Bob", LastName: "B", Email: "bob@example.com"},
-			})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	config.ldapDomain = "example.com"
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	memberOfGroupsFilter := "(|(memberOf=cn=watch-jellyfin,cn=groups,dc=example,dc=com)(memberOf=cn=manage-jellyfin,cn=groups,dc=example,dc=com))"
-	req := ldap.SearchRequest{
-		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: memberOfGroupsFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-
-	require.Len(t, res.Entries, 2, "should return alice and bob from their groups")
-	usernames := make([]string, len(res.Entries))
-	for i, entry := range res.Entries {
-		usernames[i] = entry.GetAttributeValue("cn")
-	}
-	assert.Contains(t, usernames, "alice")
-	assert.Contains(t, usernames, "bob")
-
-	bobEntry := res.Entries[0]
-	if bobEntry.GetAttributeValue("cn") != "bob" {
-		bobEntry = res.Entries[1]
-	}
-	memberOf := bobEntry.GetAttributeValues("memberOf")
-	assert.Contains(t, memberOf, "cn=manage-jellyfin,cn=groups,dc=example,dc=com")
+	require.NotEmpty(t, memberOf, "memberOf required for Jellyfin LDAP filters")
+	jellyfinUserDN := "cn=jellyfin-user,cn=groups,dc=societycell,dc=local"
+	jellyfinAdminDN := "cn=jellyfin-admin,cn=groups,dc=societycell,dc=local"
+	assert.Contains(t, memberOf, jellyfinUserDN)
+	assert.Contains(t, memberOf, jellyfinAdminDN)
 }
 
 func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
@@ -1440,12 +1020,7 @@ func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
 		"family_name":        "User",
 		"email":              "test@example.com",
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuthForUser("jellyfin", "client-uuid", bindUser, []string{"user"}, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)
@@ -1458,6 +1033,7 @@ func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {
 	config := makeHandlerConfigFromURL(t, tokenServer.URL)
 	config.userinfoEndpointURL = tokenServer.URL + "/userinfo"
 	config.ldapDomain = "societycell.local"
+	config.ldapClientID = "jellyfin"
 	h := makeHandlerWithConfig(config)
 
 	bindDN := "cn=" + bindUser + ",cn=users," + baseDN
@@ -1489,12 +1065,7 @@ func TestSearchUsersWithPictureAttribute(t *testing.T) {
 		{ID: "id3", Username: "charlie", Email: "charlie@example.com", FirstName: "Charlie", LastName: "Brown",
 			Attributes: nil},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(users)
@@ -1550,13 +1121,9 @@ func TestSearchUserBoundWithPicture(t *testing.T) {
 		"family_name":        "Smith",
 		"email":              "alice@example.com",
 		"picture":            "https://example.com/avatars/alice.jpg",
+		"groups":             []string{"ldap-client-user"},
 	}
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
+	tokenServer := httptest.NewServer(withTestAuth(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/userinfo" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(userinfoResp)

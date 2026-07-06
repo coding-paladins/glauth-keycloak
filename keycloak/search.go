@@ -48,16 +48,16 @@ type searchHandlerResult struct {
 	err    error
 }
 
-func (h *keycloakHandler) tryMemberOfGroupsSearch(sess *session, req ldap.SearchRequest) (searchHandlerResult, bool) {
-	groupNames := extractMemberOfGroupNames(req.Filter)
-	if len(groupNames) == 0 || req.Scope != ldap.ScopeWholeSubtree {
+func (h *keycloakHandler) tryMemberOfSearch(sess *session, req ldap.SearchRequest) (searchHandlerResult, bool) {
+	roleCNs := extractMemberOfRoleCNs(req.Filter)
+	if len(roleCNs) == 0 || req.Scope != ldap.ScopeWholeSubtree {
 		return searchHandlerResult{}, false
 	}
-	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) && !strings.EqualFold(req.BaseDN, h.baseDNGroups) {
+	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) && !strings.EqualFold(req.BaseDN, h.baseDNRoles) {
 		return searchHandlerResult{}, false
 	}
 	return h.executeSearchWithFilter(req, func() (ldap.ServerSearchResult, error) {
-		return h.usersByMemberOfGroupsSearchResult(sess, groupNames)
+		return h.usersByMemberOfSearchResult(sess, roleCNs)
 	}), true
 }
 
@@ -67,15 +67,6 @@ func (h *keycloakHandler) tryUsersSearch(sess *session, req ldap.SearchRequest) 
 	}
 	return h.executeSearchWithFilter(req, func() (ldap.ServerSearchResult, error) {
 		return h.usersSearchResult(sess)
-	}), true
-}
-
-func (h *keycloakHandler) tryGroupsSearch(sess *session, req ldap.SearchRequest) (searchHandlerResult, bool) {
-	if !strings.EqualFold(req.BaseDN, h.baseDNGroups) || req.Scope != ldap.ScopeWholeSubtree {
-		return searchHandlerResult{}, false
-	}
-	return h.executeSearchWithFilter(req, func() (ldap.ServerSearchResult, error) {
-		return h.groupsSearchResult(sess)
 	}), true
 }
 
@@ -223,15 +214,11 @@ func (h *keycloakHandler) Search(
 		return res, nil
 	}
 
-	if res, handled := h.tryMemberOfGroupsSearch(sess, req); handled {
+	if res, handled := h.tryMemberOfSearch(sess, req); handled {
 		return res.result, res.err
 	}
 
 	if res, handled := h.tryUsersSearch(sess, req); handled {
-		return res.result, res.err
-	}
-
-	if res, handled := h.tryGroupsSearch(sess, req); handled {
 		return res.result, res.err
 	}
 
@@ -290,13 +277,6 @@ func userToLDAPEntry(user User, baseDNUsers, ldapDomain string) *ldap.Entry {
 	return &ldap.Entry{DN: dn, Attributes: attributes}
 }
 
-func groupToLDAPEntry(group Group, baseDNGroups, ldapDomain string) *ldap.Entry {
-	objectSidBytes := sid(group.Name, ldapDomain)
-	attributes := buildGroupAttributes(group.Name, objectSidBytes)
-	dn := fmt.Sprintf("cn=%s,%s", escapeRDNValue(group.Name), baseDNGroups)
-	return &ldap.Entry{DN: dn, Attributes: attributes}
-}
-
 func extractPictureURL(attributes map[string][]string) string {
 	if attributes == nil {
 		return ""
@@ -330,16 +310,6 @@ func buildUserAttributes(samAccountName, userPrincipalName, commonName, givenNam
 		attributes = append(attributes, attributePair{name: "jpegPhoto", value: jpegPhoto})
 	}
 	return buildAttributesFromPairs(attributes)
-}
-
-func buildGroupAttributes(name string, objectSidBytes []byte) []*ldap.EntryAttribute {
-	return buildAttributesFromPairs([]attributePair{
-		{name: "objectClass", value: "group"},
-		{name: "sAMAccountName", value: name},
-		{name: "cn", value: name},
-		{name: "description", value: name},
-		{name: "objectSid", value: string(objectSidBytes)},
-	})
 }
 
 type attributePair struct {
@@ -398,23 +368,6 @@ func appendMemberOfAttribute(attributes []*ldap.EntryAttribute, values []string)
 	return append(attributes, &ldap.EntryAttribute{Name: "memberOf", Values: values})
 }
 
-func (h *keycloakHandler) groupsSearchResult(s *session) (ldap.ServerSearchResult, error) {
-	groups := &[]Group{}
-	err := h.keycloakGet(s, h.keycloakGroupsPath(), groups)
-	if err != nil {
-		return errorSearchResult(), err
-	}
-	entries := make([]*ldap.Entry, 0, len(*groups))
-	for _, group := range *groups {
-		h.log.Debug().
-			Str("name", group.Name).
-			Str("objectSid", sidToString(sid(group.Name, h.config.ldapDomain))).
-			Msg("group")
-		entries = append(entries, groupToLDAPEntry(group, h.baseDNGroups, h.config.ldapDomain))
-	}
-	return successSearchResult(entries), nil
-}
-
 func (h *keycloakHandler) usersSearchResult(s *session) (ldap.ServerSearchResult, error) {
 	users := &[]User{}
 	err := h.keycloakGet(s, h.keycloakUsersPath(), users)
@@ -429,53 +382,41 @@ func (h *keycloakHandler) usersSearchResult(s *session) (ldap.ServerSearchResult
 	return successSearchResult(entries), nil
 }
 
-// usersByMemberOfGroupsSearchResult fetches users that belong to any of the given Keycloak groups by calling
-// GET /admin/realms/{realm}/groups (to resolve name -> id) and GET /admin/realms/{realm}/groups/{id}/members.
-func (h *keycloakHandler) usersByMemberOfGroupsSearchResult(s *session, groupNames []string) (ldap.ServerSearchResult, error) {
-	allGroups := &[]Group{}
-	if err := h.keycloakGet(s, h.keycloakGroupsPath(), allGroups); err != nil {
-		h.log.Error().Err(err).Msg("keycloak get groups failed")
-		return errorSearchResult(), err
-	}
-	nameToID := make(map[string]string)
-	for _, g := range *allGroups {
-		if g.Name != "" {
-			nameToID[strings.ToLower(g.Name)] = g.ID
-		}
-	}
+// usersByMemberOfSearchResult resolves memberOf filters via Keycloak client roles.
+// memberOf cn values must match {KEYCLOAK_LDAP_CLIENT_ID}-{role} (User Client Role mapper).
+func (h *keycloakHandler) usersByMemberOfSearchResult(s *session, memberOfCNs []string) (ldap.ServerSearchResult, error) {
 	entriesByID := make(map[string]*ldap.Entry)
 	memberOfByID := make(map[string]map[string]bool)
-	for _, groupName := range groupNames {
-		if groupName == "" {
+
+	for _, cn := range memberOfCNs {
+		if cn == "" {
 			continue
 		}
-		groupID, ok := nameToID[strings.ToLower(groupName)]
+		roleName, ok := clientRoleNameFromMemberOfCN(cn, h.config.ldapClientID)
 		if !ok {
-			h.log.Debug().Str("groupName", groupName).Msg("group not found in Keycloak")
+			h.log.Debug().Str("memberOfCN", cn).Str("clientID", h.config.ldapClientID).Msg("memberOf cn does not match client role prefix")
 			continue
 		}
-		users := &[]User{}
-		path := h.keycloakGroupMembersPath(groupID)
-		if err := h.keycloakGet(s, path, users); err != nil {
-			h.log.Debug().Err(err).Str("groupName", groupName).Str("groupID", groupID).Msg("keycloak get group members failed")
+		users, err := h.usersWithClientRole(s, roleName)
+		if err != nil {
+			h.log.Debug().Err(err).Str("memberOfCN", cn).Str("roleName", roleName).Msg("keycloak get client role members failed")
 			continue
 		}
-		for _, user := range *users {
-			entry, ok := entriesByID[user.ID]
-			if !ok {
-				entry = userToLDAPEntry(user, h.baseDNUsers, h.config.ldapDomain)
-				entriesByID[user.ID] = entry
-			}
-			if memberOfByID[user.ID] == nil {
-				memberOfByID[user.ID] = make(map[string]bool)
-			}
-			memberOfByID[user.ID][groupName] = true
+		for _, user := range users {
+			mergeUserMemberOf(entriesByID, memberOfByID, user, h.baseDNUsers, h.config.ldapDomain, cn)
 		}
 	}
+	return h.memberOfSearchEntries(entriesByID, memberOfByID)
+}
+
+func (h *keycloakHandler) memberOfSearchEntries(
+	entriesByID map[string]*ldap.Entry,
+	memberOfByID map[string]map[string]bool,
+) (ldap.ServerSearchResult, error) {
 	entries := make([]*ldap.Entry, 0, len(entriesByID))
 	for userID, entry := range entriesByID {
 		if groupsForUser := memberOfByID[userID]; len(groupsForUser) > 0 {
-			memberOfValues := memberOfValuesFromSet(groupsForUser, h.baseDNGroups)
+			memberOfValues := memberOfValuesFromSet(groupsForUser, h.baseDNRoles)
 			entry.Attributes = appendMemberOfAttribute(entry.Attributes, memberOfValues)
 		}
 		entries = append(entries, entry)
@@ -483,7 +424,22 @@ func (h *keycloakHandler) usersByMemberOfGroupsSearchResult(s *session, groupNam
 	return successSearchResult(entries), nil
 }
 
-func buildUserBoundEntry(h *keycloakHandler, info *userinfoResponse, boundDN string) *ldap.Entry {
+func mergeUserMemberOf(
+	entriesByID map[string]*ldap.Entry,
+	memberOfByID map[string]map[string]bool,
+	user User,
+	baseDNUsers, ldapDomain, memberOfCN string,
+) {
+	if _, ok := entriesByID[user.ID]; !ok {
+		entriesByID[user.ID] = userToLDAPEntry(user, baseDNUsers, ldapDomain)
+	}
+	if memberOfByID[user.ID] == nil {
+		memberOfByID[user.ID] = make(map[string]bool)
+	}
+	memberOfByID[user.ID][memberOfCN] = true
+}
+
+func buildUserBoundEntry(h *keycloakHandler, info *userinfoResponse, boundDN string, roleCNs []string) *ldap.Entry {
 	userDN := fmt.Sprintf("cn=%s,%s", escapeRDNValue(info.PreferredName), h.baseDNUsers)
 	entryDN := userDN
 	if boundDN != "" {
@@ -507,14 +463,9 @@ func buildUserBoundEntry(h *keycloakHandler, info *userinfoResponse, boundDN str
 		info.Picture,
 		objectSidBytes,
 	)
-	groupNames := make([]string, 0, len(info.Groups))
-	for _, g := range info.Groups {
-		cn := groupPathToCN(g)
-		if cn != "" {
-			groupNames = append(groupNames, cn)
-		}
+	if len(roleCNs) > 0 {
+		attributes = appendMemberOfAttribute(attributes, buildMemberOfValues(roleCNs, h.baseDNRoles))
 	}
-	attributes = appendMemberOfAttribute(attributes, buildMemberOfValues(groupNames, h.baseDNGroups))
 	return &ldap.Entry{DN: entryDN, Attributes: attributes}
 }
 
@@ -525,7 +476,15 @@ func (h *keycloakHandler) userBoundSearchResult(s *session, boundDN string, req 
 		return errorSearchResult(), err
 	}
 	userDN := fmt.Sprintf("cn=%s,%s", escapeRDNValue(info.PreferredName), h.baseDNUsers)
-	entry := buildUserBoundEntry(h, info, boundDN)
+	roleCNs := s.clientRoleCNs
+	if len(roleCNs) == 0 {
+		var roleErr error
+		roleCNs, roleErr = h.userClientRoleCNs(info.PreferredName)
+		if roleErr != nil {
+			h.log.Debug().Err(roleErr).Str("username", info.PreferredName).Msg("user-bound search client role lookup failed")
+		}
+	}
+	entry := buildUserBoundEntry(h, info, boundDN, roleCNs)
 
 	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) && !strings.EqualFold(req.BaseDN, userDN) && !strings.EqualFold(req.BaseDN, boundDN) {
 		return emptySearchResult(), nil

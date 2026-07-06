@@ -36,9 +36,12 @@ const userAccountControlNormal = "512"
 type keycloakHandler struct {
 	config          *keycloakHandlerConfig
 	baseDNUsers     string
-	baseDNGroups    string
+	baseDNRoles     string
 	baseDNBindUsers string
+	clientUUID      string // cached Keycloak internal id for ldapClientID
 	httpClient      *http.Client
+	serviceSession  *session
+	serviceMu       sync.Mutex
 	sessions        map[string]*session
 	connToKey       map[net.Conn]string // maps connection to unique session key (avoids NAT collision)
 	sessionsMu      sync.RWMutex
@@ -59,12 +62,13 @@ type keycloakHandlerConfig struct {
 }
 
 type session struct {
-	clientID     string
-	clientSecret string
-	boundDN      *string
-	token        *oauth2.Token
-	isUserBound  bool
-	lastActivity time.Time
+	clientID      string
+	clientSecret  string
+	boundDN       *string
+	token         *oauth2.Token
+	isUserBound   bool
+	clientRoleCNs []string // LDAP memberOf cn values from Keycloak client roles (user bind)
+	lastActivity  time.Time
 }
 
 // Handler (Binder)
@@ -114,7 +118,16 @@ func (h *keycloakHandler) Bind(
 			h.log.Error().Err(err).Str("username", username).Msg("user bind failed")
 			return ldap.LDAPResultInvalidCredentials, nil
 		}
-		s.openUser(bindDN, token)
+		roleCNs, err := h.userClientRoleCNs(username)
+		if err != nil {
+			h.log.Error().Err(err).Str("username", username).Msg("user bind client role lookup failed")
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
+		if len(roleCNs) == 0 {
+			h.log.Error().Str("username", username).Msg("user bind denied: no client roles assigned")
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
+		s.openUser(bindDN, token, roleCNs)
 		h.logBindResponseUser(username)
 		return ldap.LDAPResultSuccess, nil
 	}
@@ -326,7 +339,7 @@ func NewKeycloakHandler(opts ...handler.Option) handler.Handler {
 	return &keycloakHandler{
 		config:          config,
 		baseDNUsers:     "cn=users," + baseDN,
-		baseDNGroups:    "cn=groups," + baseDN,
+		baseDNRoles:     "cn=groups," + baseDN,
 		baseDNBindUsers: "cn=bind," + baseDN,
 		httpClient:      httpClient,
 		sessions:        make(map[string]*session),

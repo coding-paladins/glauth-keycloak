@@ -130,8 +130,14 @@ func newKeycloakHandlerConfig(log *zerolog.Logger) (*keycloakHandlerConfig, erro
 		c.keycloakInsecureSkipVerify = false
 	}
 
-	c.ldapClientID = getenv(log, "KEYCLOAK_LDAP_CLIENT_ID")
-	c.ldapClientSecret = getenv(log, "KEYCLOAK_LDAP_CLIENT_SECRET")
+	c.ldapClientID, err = requireEnv(log, "KEYCLOAK_LDAP_CLIENT_ID")
+	if err != nil {
+		return nil, err
+	}
+	c.ldapClientSecret, err = requireEnv(log, "KEYCLOAK_LDAP_CLIENT_SECRET")
+	if err != nil {
+		return nil, err
+	}
 	scheme := c.keycloakScheme
 	if scheme == "" {
 		scheme = "https"
