@@ -1,0 +1,12 @@
+.git
+.github
+.devcontainer
+docs
+cmd
+scripts
+**/*_test.go
+*.md
+LICENSE
+kubeconfig
+.env
+.env.*

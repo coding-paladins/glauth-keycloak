@@ -130,51 +130,20 @@ func runFeatureTests(connection *ldap.Conn, baseDN, bindUser, bindPassword strin
 	}
 	fmt.Printf("memberOf search (%s): %d entries\n", memberOfGroups, len(memberOfResult.Entries))
 
-	// Same test with roles: get test user's roles from memberOf (ou=roles,...), then search users by those roles
-	rolesBase := "ou=roles," + baseDN
-	userRoles := getTestUserRoles(connection, usersBase)
-	memberOfRoles := getEnv("LDAP_MEMBEROF_ROLES", "")
-	if memberOfRoles == "" && len(userRoles) > 0 {
-		memberOfRoles = strings.Join(userRoles, ",")
-		fmt.Printf("test user roles (from memberOf): %s\n", memberOfRoles)
-	}
-	if memberOfRoles == "" {
-		memberOfRoles = "default-roles-societycell"
-		fmt.Println("no test user roles found, using default for memberOf roles: " + memberOfRoles)
-	}
-	memberOfRolesFilter := buildMemberOfFilter(memberOfRoles, rolesBase)
-	memberOfRolesResult, err := connection.Search(ldap.NewSearchRequest(
-		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		memberOfRolesFilter,
-		[]string{"uid", "userPrincipalName", "description", "givenName", "sn", "mail", "userAccountControl", "lockoutTime", "objectSid"},
-		[]ldap.Control{ldap.NewControlPaging(100)},
-	))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "memberOf (roles) search failed: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("memberOf search by roles (%s): %d entries\n", memberOfRoles, len(memberOfRolesResult.Entries))
-
-	// Real Keycloak check: role-based memberOf uses GET /admin/realms/{realm}/roles/{role-name}/users (role name, not ID).
-	// If the handler used role ID instead, Keycloak would return 404 and we would get 0 entries or an error.
-	if len(userRoles) > 0 && len(memberOfRolesResult.Entries) == 0 {
-		fmt.Fprintf(os.Stderr, "memberOf (roles) search returned 0 entries but bound user has roles %v; Keycloak API may be called with role ID instead of role name\n", userRoles)
-		os.Exit(1)
-	}
 	boundUserDN := fmt.Sprintf("cn=%s,%s", bindUser, usersBase)
 	foundBoundUser := false
-	for _, entry := range memberOfRolesResult.Entries {
+	for _, entry := range memberOfResult.Entries {
 		if entry.DN == boundUserDN {
 			foundBoundUser = true
 			break
 		}
 	}
-	if len(userRoles) > 0 && !foundBoundUser && len(memberOfRolesResult.Entries) > 0 {
-		fmt.Fprintf(os.Stderr, "memberOf (roles) search returned %d entries but bound user %q not among them; verify role name is used in Keycloak API path\n", len(memberOfRolesResult.Entries), boundUserDN)
+	if len(userGroups) > 0 && !foundBoundUser && len(memberOfResult.Entries) > 0 {
+		fmt.Fprintf(os.Stderr, "memberOf search returned %d entries but bound user %q not among them\n", len(memberOfResult.Entries), boundUserDN)
 		os.Exit(1)
 	}
-	if len(userRoles) > 0 {
-		fmt.Println("memberOf (roles) real Keycloak check: passed (role name used in API path)")
+	if len(userGroups) > 0 {
+		fmt.Println("memberOf (groups) check: passed")
 	}
 
 	fmt.Println("all features exercised successfully")
@@ -210,40 +179,6 @@ func getTestUserGroups(connection *ldap.Conn, usersBase string) []string {
 		}
 	}
 	return groupNames
-}
-
-// getTestUserRoles returns role names from the bound user's memberOf attribute where the DN contains ",ou=roles,".
-func getTestUserRoles(connection *ldap.Conn, usersBase string) []string {
-	req := ldap.NewSearchRequest(
-		usersBase, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		"(objectClass=user)",
-		[]string{"memberOf"},
-		[]ldap.Control{ldap.NewControlPaging(100)},
-	)
-	result, err := connection.Search(req)
-	if err != nil || result == nil || len(result.Entries) == 0 {
-		return nil
-	}
-	var roleNames []string
-	seen := make(map[string]bool)
-	for _, entry := range result.Entries {
-		for _, attr := range entry.Attributes {
-			if attr.Name != "memberOf" {
-				continue
-			}
-			for _, dn := range attr.Values {
-				if !strings.Contains(dn, ",ou=roles,") {
-					continue
-				}
-				name := parseGroupNameFromMemberOfDN(dn)
-				if name != "" && !seen[name] {
-					seen[name] = true
-					roleNames = append(roleNames, name)
-				}
-			}
-		}
-	}
-	return roleNames
 }
 
 // parseGroupNameFromMemberOfDN extracts the first RDN cn value from a memberOf DN.

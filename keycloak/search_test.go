@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -690,9 +689,9 @@ func TestBuildMemberOfValuesSkipsEmptyName(t *testing.T) {
 }
 
 func TestMemberOfValuesFromSetSkipsEmptyName(t *testing.T) {
-	values := memberOfValuesFromSet(map[string]bool{"r1": true, "": true}, "ou=roles,dc=example,dc=com")
+	values := memberOfValuesFromSet(map[string]bool{"g1": true, "": true}, "cn=groups,dc=example,dc=com")
 	require.Len(t, values, 1)
-	assert.Equal(t, "cn=r1,ou=roles,dc=example,dc=com", values[0])
+	assert.Equal(t, "cn=g1,cn=groups,dc=example,dc=com", values[0])
 }
 
 func TestSearchFilterCompileFails(t *testing.T) {
@@ -1044,15 +1043,14 @@ func TestSearchUsersWithPrefixIsCaseInsensitive(t *testing.T) {
 	assert.Len(t, res.Entries, 1, "prefix match should be case-insensitive")
 }
 
-func TestSearchUserBoundUserinfoWithGroupsAndRoles(t *testing.T) {
+func TestSearchUserBoundUserinfoWithGroups(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "alice",
 		"given_name":         "Alice",
 		"family_name":        "A",
 		"email":              "alice@example.com",
-		"groups":             []string{"/admins", "/parent/developers"},
-		"realm_access":       map[string]interface{}{"roles": []string{"user", "admin"}},
+		"groups":             []string{"/admins", "/parent/developers", "amp-admins"},
 	}
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
@@ -1087,15 +1085,14 @@ func TestSearchUserBoundUserinfoWithGroupsAndRoles(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	require.NotEmpty(t, memberOf, "memberOf should contain group and role DNs")
+	require.NotEmpty(t, memberOf, "memberOf should contain group DNs")
 	assert.Contains(t, memberOf, "cn=admins,cn=groups,dc=example,dc=com")
 	assert.Contains(t, memberOf, "cn=developers,cn=groups,dc=example,dc=com")
-	assert.Contains(t, memberOf, "cn=user,ou=roles,dc=example,dc=com")
-	assert.Contains(t, memberOf, "cn=admin,ou=roles,dc=example,dc=com")
-	assert.Len(t, memberOf, 4)
+	assert.Contains(t, memberOf, "cn=amp-admins,cn=groups,dc=example,dc=com")
+	assert.Len(t, memberOf, 3)
 }
 
-func TestSearchUserBoundUserinfoWithRolesOnly(t *testing.T) {
+func TestSearchUserBoundUserinfoIgnoresRoles(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "bob",
@@ -1133,7 +1130,7 @@ func TestSearchUserBoundUserinfoWithRolesOnly(t *testing.T) {
 	entry := res.Entries[0]
 
 	memberOf := entry.GetAttributeValues("memberOf")
-	assert.Contains(t, memberOf, "cn=viewer,ou=roles,dc=example,dc=com")
+	assert.Empty(t, memberOf, "roles in userinfo must not appear in memberOf")
 }
 
 func TestSearchUserBoundUserinfoWithGroupsOnly(t *testing.T) {
@@ -1181,7 +1178,7 @@ func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 	userinfoResp := map[string]interface{}{
 		"sub":                "sub-id",
 		"preferred_username": "test",
-		"realm_access":       map[string]interface{}{"roles": []string{"jellyfin-users", "jellyfin-admins"}},
+		"groups":             []string{"jellyfin-users", "jellyfin-admins"},
 	}
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
@@ -1219,34 +1216,34 @@ func TestSearchUserBoundMemberOfJellyfinStyle(t *testing.T) {
 
 	memberOf := entry.GetAttributeValues("memberOf")
 	require.NotEmpty(t, memberOf, "memberOf required for filter (|(memberOf=cn=jellyfin-users,...)(memberOf=cn=jellyfin-admins,...))")
-	jellyfinUsersDN := "cn=jellyfin-users,ou=roles,dc=societycell,dc=local"
-	jellyfinAdminsDN := "cn=jellyfin-admins,ou=roles,dc=societycell,dc=local"
+	jellyfinUsersDN := "cn=jellyfin-users,cn=groups,dc=societycell,dc=local"
+	jellyfinAdminsDN := "cn=jellyfin-admins,cn=groups,dc=societycell,dc=local"
 	assert.Contains(t, memberOf, jellyfinUsersDN, "entry must have memberOf for jellyfin-users so Jellyfin-style filter matches")
 	assert.Contains(t, memberOf, jellyfinAdminsDN, "entry must have memberOf for jellyfin-admins so Jellyfin-style filter matches")
 }
 
-func TestSearchMemberOfRolesUsesRoleNameInAPIPath(t *testing.T) {
-	var usersPathReceived string
-	var compositePathReceived string
+func TestSearchMemberOfGroupsUsesGroupMembersAPI(t *testing.T) {
+	var groupsPathReceived string
+	var membersPathReceived string
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
-			usersPathReceived = r.URL.Path
+		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
+			groupsPathReceived = r.URL.Path
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
+			_ = json.NewEncoder(w).Encode([]Group{
+				{ID: "group-1", Name: "jellyfin-users"},
 			})
 			return
 		}
-		if strings.Contains(r.URL.Path, "/role-mappings/realm/composite") && r.Method == "GET" {
-			compositePathReceived = r.URL.Path
+		if r.URL.Path == "/admin/realms/test/groups/group-1/members" && r.Method == "GET" {
+			membersPathReceived = r.URL.Path
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "role-1", Name: "jellyfin-users"},
+			_ = json.NewEncoder(w).Encode([]User{
+				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
 			})
 			return
 		}
@@ -1260,46 +1257,89 @@ func TestSearchMemberOfRolesUsesRoleNameInAPIPath(t *testing.T) {
 	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
 	require.EqualValues(t, ldap.LDAPResultSuccess, code)
 
-	memberOfRolesFilter := "(|(memberOf=cn=jellyfin-users,ou=roles,dc=example,dc=com))"
+	memberOfGroupsFilter := "(|(memberOf=cn=jellyfin-users,cn=groups,dc=example,dc=com))"
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: memberOfRolesFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+		Filter: memberOfGroupsFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
 
-	require.Equal(t, "/admin/realms/test/users", usersPathReceived, "should fetch all users")
-	require.Contains(t, compositePathReceived, "/users/user-1/role-mappings/realm/composite",
-		"should get composite roles for each user to include inherited roles")
+	require.Equal(t, "/admin/realms/test/groups", groupsPathReceived, "should list groups to resolve name to id")
+	require.Equal(t, "/admin/realms/test/groups/group-1/members", membersPathReceived, "should fetch group members")
 	require.Len(t, res.Entries, 1)
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
 }
 
-func TestSearchMemberOfRolesOneUserRoleMappingFailsContinues(t *testing.T) {
+func TestSearchMemberOfGroupsWithGroupsBaseDN(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Group{
+				{ID: "group-1", Name: "manage-jellyfin"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/groups/group-1/members" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{
+				{ID: "user-1", Username: "admin", FirstName: "Admin", LastName: "User", Email: "admin@example.com"},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer tokenServer.Close()
+
+	config := makeHandlerConfigFromURL(t, tokenServer.URL)
+	config.ldapDomain = "example.com"
+	h := makeHandlerWithConfig(config)
+	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
+	require.EqualValues(t, ldap.LDAPResultSuccess, code)
+
+	adminFilter := "(memberOf=cn=manage-jellyfin,cn=groups,dc=example,dc=com)"
+	req := ldap.SearchRequest{
+		BaseDN: "cn=groups,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
+		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
+		Filter: adminFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+	}
+	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
+	require.NoError(t, err)
+	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
+	require.Len(t, res.Entries, 1, "admin search with baseDN=cn=groups should work (Jellyfin admin filter)")
+	assert.Equal(t, "cn=admin,cn=users,dc=example,dc=com", res.Entries[0].DN)
+}
+
+func TestSearchMemberOfGroupsOneGroupMembersFailsContinues(t *testing.T) {
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Group{
+				{ID: "g-bad", Name: "bad-group"},
+				{ID: "g-good", Name: "good-group"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/groups/g-good/members" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
 				{ID: "u1", Username: "alice", FirstName: "A", LastName: "B", Email: "a@b.com"},
-				{ID: "u2", Username: "bob", FirstName: "B", LastName: "C", Email: "b@c.com"},
 			})
 			return
 		}
-		if r.URL.Path == "/admin/realms/test/users/u1/role-mappings/realm/composite" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "r1", Name: "good-role"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users/u2/role-mappings/realm/composite" && r.Method == "GET" {
+		if r.URL.Path == "/admin/realms/test/groups/g-bad/members" && r.Method == "GET" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -1312,7 +1352,7 @@ func TestSearchMemberOfRolesOneUserRoleMappingFailsContinues(t *testing.T) {
 	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
 	require.EqualValues(t, ldap.LDAPResultSuccess, code)
 
-	filter := "(|(memberOf=cn=bad-role,ou=roles,dc=example,dc=com)(memberOf=cn=good-role,ou=roles,dc=example,dc=com))"
+	filter := "(|(memberOf=cn=bad-group,cn=groups,dc=example,dc=com)(memberOf=cn=good-group,cn=groups,dc=example,dc=com))"
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
@@ -1321,48 +1361,36 @@ func TestSearchMemberOfRolesOneUserRoleMappingFailsContinues(t *testing.T) {
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	require.NoError(t, err)
 	assert.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "should return users from good-role despite one user role-mappings failing")
+	require.Len(t, res.Entries, 1, "should return users from good-group despite one group members request failing")
 	assert.Equal(t, "cn=alice,cn=users,dc=example,dc=com", res.Entries[0].DN)
 }
 
-func TestSearchMemberOfRolesWithInheritedCompositeRoles(t *testing.T) {
+func TestSearchMemberOfGroupsMultipleGroups(t *testing.T) {
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
+		if r.URL.Path == "/admin/realms/test/groups" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]Group{
+				{ID: "g1", Name: "watch-jellyfin"},
+				{ID: "g2", Name: "manage-jellyfin"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/groups/g1/members" && r.Method == "GET" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]User{
 				{ID: "user-1", Username: "alice", FirstName: "Alice", LastName: "A", Email: "alice@example.com"},
+			})
+			return
+		}
+		if r.URL.Path == "/admin/realms/test/groups/g2/members" && r.Method == "GET" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]User{
 				{ID: "user-2", Username: "bob", FirstName: "Bob", LastName: "B", Email: "bob@example.com"},
-				{ID: "user-3", Username: "carol", FirstName: "Carol", LastName: "C", Email: "carol@example.com"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users/user-1/role-mappings/realm/composite" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "role-1", Name: "watch-jellyfin"},
-				{ID: "role-2", Name: "default-roles-societycell"},
-				{ID: "role-3", Name: "offline_access"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users/user-2/role-mappings/realm/composite" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "role-4", Name: "manage-jellyfin"},
-				{ID: "role-5", Name: "watch-jellyfin"},
-				{ID: "role-2", Name: "default-roles-societycell"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users/user-3/role-mappings/realm/composite" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "role-2", Name: "default-roles-societycell"},
 			})
 			return
 		}
@@ -1376,76 +1404,30 @@ func TestSearchMemberOfRolesWithInheritedCompositeRoles(t *testing.T) {
 	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
 	require.EqualValues(t, ldap.LDAPResultSuccess, code)
 
-	memberOfRolesFilter := "(|(memberOf=cn=watch-jellyfin,ou=roles,dc=example,dc=com)(memberOf=cn=manage-jellyfin,ou=roles,dc=example,dc=com))"
+	memberOfGroupsFilter := "(|(memberOf=cn=watch-jellyfin,cn=groups,dc=example,dc=com)(memberOf=cn=manage-jellyfin,cn=groups,dc=example,dc=com))"
 	req := ldap.SearchRequest{
 		BaseDN: "cn=users,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
 		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: memberOfRolesFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
+		Filter: memberOfGroupsFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
 	}
 	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
 
-	require.Len(t, res.Entries, 2, "should return alice (watch-jellyfin inherited) and bob (both roles)")
+	require.Len(t, res.Entries, 2, "should return alice and bob from their groups")
 	usernames := make([]string, len(res.Entries))
 	for i, entry := range res.Entries {
 		usernames[i] = entry.GetAttributeValue("cn")
 	}
 	assert.Contains(t, usernames, "alice")
 	assert.Contains(t, usernames, "bob")
-	assert.NotContains(t, usernames, "carol", "carol has no watch-jellyfin or manage-jellyfin role")
 
 	bobEntry := res.Entries[0]
 	if bobEntry.GetAttributeValue("cn") != "bob" {
 		bobEntry = res.Entries[1]
 	}
 	memberOf := bobEntry.GetAttributeValues("memberOf")
-	assert.Contains(t, memberOf, "cn=watch-jellyfin,ou=roles,dc=example,dc=com")
-	assert.Contains(t, memberOf, "cn=manage-jellyfin,ou=roles,dc=example,dc=com")
-}
-
-func TestSearchMemberOfRolesWithRolesBaseDN(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/realms/test/protocol/openid-connect/token" && r.Method == "POST" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"access_token": "tok", "token_type": "Bearer", "expires_in": 3600})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]User{
-				{ID: "user-1", Username: "admin", FirstName: "Admin", LastName: "User", Email: "admin@example.com"},
-			})
-			return
-		}
-		if r.URL.Path == "/admin/realms/test/users/user-1/role-mappings/realm/composite" && r.Method == "GET" {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode([]Role{
-				{ID: "role-1", Name: "manage-jellyfin"},
-			})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer tokenServer.Close()
-
-	config := makeHandlerConfigFromURL(t, tokenServer.URL)
-	config.ldapDomain = "example.com"
-	h := makeHandlerWithConfig(config)
-	code, _ := h.Bind("cn=svc,cn=bind,dc=example,dc=com", "secret", nil)
-	require.EqualValues(t, ldap.LDAPResultSuccess, code)
-
-	adminFilter := "(memberOf=cn=manage-jellyfin,ou=roles,dc=example,dc=com)"
-	req := ldap.SearchRequest{
-		BaseDN: "ou=roles,dc=example,dc=com", Scope: ldap.ScopeWholeSubtree, DerefAliases: ldap.NeverDerefAliases,
-		SizeLimit: 0, TimeLimit: 0, TypesOnly: false,
-		Filter: adminFilter, Attributes: attributes9, Controls: []ldap.Control{ldap.NewControlPaging(100)},
-	}
-	res, err := h.Search(*h.getSession(nil).boundDN, req, nil)
-	require.NoError(t, err)
-	require.EqualValues(t, ldap.LDAPResultSuccess, res.ResultCode)
-	require.Len(t, res.Entries, 1, "admin search with baseDN=ou=roles should work (Jellyfin admin filter)")
-	assert.Equal(t, "cn=admin,cn=users,dc=example,dc=com", res.Entries[0].DN)
+	assert.Contains(t, memberOf, "cn=manage-jellyfin,cn=groups,dc=example,dc=com")
 }
 
 func TestPortForwardTestLapJellyfinExactUser(t *testing.T) {

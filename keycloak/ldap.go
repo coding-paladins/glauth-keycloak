@@ -11,12 +11,6 @@ import (
 	ldapv3 "github.com/go-ldap/ldap/v3"
 )
 
-// extractMemberOfRoleNames parses an LDAP filter like (|(memberOf=cn=role1,ou=roles,dc=...)(memberOf=cn=role2,ou=roles,dc=...))
-// and returns the list of role names (cn values from clauses whose DN contains "ou=roles").
-func extractMemberOfRoleNames(filter string) []string {
-	return extractMemberOfNames(filter, "ou=roles")
-}
-
 // extractMemberOfGroupNames parses an LDAP filter like (|(memberOf=cn=group1,cn=groups,dc=...)(memberOf=cn=group2,cn=groups,dc=...))
 // and returns the list of group names (cn values from clauses whose DN contains "groups").
 func extractMemberOfGroupNames(filter string) []string {
@@ -76,14 +70,6 @@ func extractMemberOfNames(filter string, dnContains string) []string {
 	}
 	walk(filterPacket)
 	return names
-}
-
-// realmRolesFromUserinfo returns all role names from the userinfo response (Roles is filled from any Keycloak role claim).
-func realmRolesFromUserinfo(info *userinfoResponse) []string {
-	if info == nil || len(info.Roles) == 0 {
-		return nil
-	}
-	return info.Roles
 }
 
 // groupPathToCN turns a Keycloak group path (e.g. "/admins" or "/parent/child") into an LDAP cn value (last segment).

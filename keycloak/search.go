@@ -48,26 +48,12 @@ type searchHandlerResult struct {
 	err    error
 }
 
-func (h *keycloakHandler) tryMemberOfRolesSearch(sess *session, req ldap.SearchRequest) (searchHandlerResult, bool) {
-	rolesBaseDN := "ou=roles," + strings.TrimPrefix(h.baseDNUsers, "cn=users,")
-	roleNames := memberOfRolesSearchRoleNames(req)
-	if len(roleNames) == 0 || req.Scope != ldap.ScopeWholeSubtree {
-		return searchHandlerResult{}, false
-	}
-	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) && !strings.EqualFold(req.BaseDN, rolesBaseDN) {
-		return searchHandlerResult{}, false
-	}
-	return h.executeSearchWithFilter(req, func() (ldap.ServerSearchResult, error) {
-		return h.usersByMemberOfRolesSearchResult(sess, roleNames)
-	}), true
-}
-
 func (h *keycloakHandler) tryMemberOfGroupsSearch(sess *session, req ldap.SearchRequest) (searchHandlerResult, bool) {
 	groupNames := extractMemberOfGroupNames(req.Filter)
-	if len(groupNames) == 0 {
+	if len(groupNames) == 0 || req.Scope != ldap.ScopeWholeSubtree {
 		return searchHandlerResult{}, false
 	}
-	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) || req.Scope != ldap.ScopeWholeSubtree {
+	if !strings.EqualFold(req.BaseDN, h.baseDNUsers) && !strings.EqualFold(req.BaseDN, h.baseDNGroups) {
 		return searchHandlerResult{}, false
 	}
 	return h.executeSearchWithFilter(req, func() (ldap.ServerSearchResult, error) {
@@ -235,10 +221,6 @@ func (h *keycloakHandler) Search(
 		res := h.rootDSESearchResult()
 		h.logSearchResponse(req.BaseDN, len(res.Entries))
 		return res, nil
-	}
-
-	if res, handled := h.tryMemberOfRolesSearch(sess, req); handled {
-		return res.result, res.err
 	}
 
 	if res, handled := h.tryMemberOfGroupsSearch(sess, req); handled {
@@ -447,68 +429,6 @@ func (h *keycloakHandler) usersSearchResult(s *session) (ldap.ServerSearchResult
 	return successSearchResult(entries), nil
 }
 
-// memberOfRolesSearchRoleNames returns role names if the search request is a memberOf filter for ou=roles (e.g. (|(memberOf=cn=role1,ou=roles,...)(memberOf=cn=role2,ou=roles,...))).
-// Keycloak's API for users by role is GET /admin/realms/{realm}/roles/{role-name}/users, which expects the role name, not the role ID.
-func memberOfRolesSearchRoleNames(req ldap.SearchRequest) []string {
-	names := extractMemberOfRoleNames(req.Filter)
-	if len(names) == 0 {
-		return nil
-	}
-	return names
-}
-
-// usersByMemberOfRolesSearchResult fetches users that have any of the given realm roles (including inherited/composite roles).
-// It fetches all users and checks their effective role-mappings (GET /admin/realms/{realm}/users/{userId}/role-mappings/realm/composite)
-// to include users who inherit the role through composite roles or groups.
-func (h *keycloakHandler) usersByMemberOfRolesSearchResult(s *session, roleNames []string) (ldap.ServerSearchResult, error) {
-	if len(roleNames) == 0 {
-		return successSearchResult([]*ldap.Entry{}), nil
-	}
-	targetRoles := make(map[string]bool)
-	for _, name := range roleNames {
-		if name != "" {
-			targetRoles[strings.ToLower(name)] = true
-		}
-	}
-	allUsers := &[]User{}
-	if err := h.keycloakGet(s, h.keycloakUsersPath(), allUsers); err != nil {
-		h.log.Error().Err(err).Msg("keycloak get all users failed")
-		return errorSearchResult(), err
-	}
-	entriesByID := make(map[string]*ldap.Entry)
-	memberOfByID := make(map[string]map[string]bool)
-	rolesBaseDN := "ou=roles," + strings.TrimPrefix(h.baseDNUsers, "cn=users,")
-	for _, user := range *allUsers {
-		effectiveRoles := &[]Role{}
-		path := h.keycloakUserRoleMappingsCompositePath(user.ID)
-		if err := h.keycloakGet(s, path, effectiveRoles); err != nil {
-			h.log.Debug().Err(err).Str("userID", user.ID).Msg("keycloak get user effective roles failed")
-			continue
-		}
-		matchedRoles := make(map[string]bool)
-		for _, role := range *effectiveRoles {
-			roleLower := strings.ToLower(role.Name)
-			if targetRoles[roleLower] {
-				matchedRoles[role.Name] = true
-			}
-		}
-		if len(matchedRoles) > 0 {
-			entry := userToLDAPEntry(user, h.baseDNUsers, h.config.ldapDomain)
-			entriesByID[user.ID] = entry
-			memberOfByID[user.ID] = matchedRoles
-		}
-	}
-	entries := make([]*ldap.Entry, 0, len(entriesByID))
-	for userID, entry := range entriesByID {
-		if rolesForUser := memberOfByID[userID]; len(rolesForUser) > 0 {
-			memberOfValues := memberOfValuesFromSet(rolesForUser, rolesBaseDN)
-			entry.Attributes = appendMemberOfAttribute(entry.Attributes, memberOfValues)
-		}
-		entries = append(entries, entry)
-	}
-	return successSearchResult(entries), nil
-}
-
 // usersByMemberOfGroupsSearchResult fetches users that belong to any of the given Keycloak groups by calling
 // GET /admin/realms/{realm}/groups (to resolve name -> id) and GET /admin/realms/{realm}/groups/{id}/members.
 func (h *keycloakHandler) usersByMemberOfGroupsSearchResult(s *session, groupNames []string) (ldap.ServerSearchResult, error) {
@@ -587,19 +507,14 @@ func buildUserBoundEntry(h *keycloakHandler, info *userinfoResponse, boundDN str
 		info.Picture,
 		objectSidBytes,
 	)
-	rolesBaseDN := "ou=roles," + strings.TrimPrefix(h.baseDNUsers, "cn=users,")
-	groupNames := make([]string, 0)
+	groupNames := make([]string, 0, len(info.Groups))
 	for _, g := range info.Groups {
 		cn := groupPathToCN(g)
 		if cn != "" {
 			groupNames = append(groupNames, cn)
 		}
 	}
-	memberOfValues := append(
-		buildMemberOfValues(groupNames, h.baseDNGroups),
-		buildMemberOfValues(realmRolesFromUserinfo(info), rolesBaseDN)...,
-	)
-	attributes = appendMemberOfAttribute(attributes, memberOfValues)
+	attributes = appendMemberOfAttribute(attributes, buildMemberOfValues(groupNames, h.baseDNGroups))
 	return &ldap.Entry{DN: entryDN, Attributes: attributes}
 }
 

@@ -6,15 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 )
 
 type Group struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type Role struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
@@ -37,36 +31,7 @@ type userinfoResponse struct {
 	FamilyName    string   `json:"family_name"`
 	EmailVerified bool     `json:"email_verified"`
 	Picture       string   `json:"picture"`
-	Groups        []string `json:"groups"` // optional: Keycloak groups mapper with "Add to userinfo"
-	Roles         []string `json:"-"`      // all roles: filled from "roles", "realm_roles", or "realm_access.roles"
-}
-
-// userinfoRolesRaw is used to unmarshal role claims from userinfo (Keycloak can send any of these shapes).
-type userinfoRolesRaw struct {
-	Roles       []string `json:"roles"`
-	RealmRoles  []string `json:"realm_roles"`
-	RealmAccess *struct {
-		Roles []string `json:"roles"`
-	} `json:"realm_access"`
-}
-
-// userinfoDecode has all userinfo fields at top level so flat Keycloak JSON unmarshals correctly.
-type userinfoDecode struct {
-	Sub            string                    `json:"sub"`
-	PreferredName  string                    `json:"preferred_username"`
-	Email          string                    `json:"email"`
-	Name           string                    `json:"name"`
-	GivenName      string                    `json:"given_name"`
-	FamilyName     string                    `json:"family_name"`
-	EmailVerified  bool                      `json:"email_verified"`
-	Picture        string                    `json:"picture"`
-	Groups         []string                  `json:"groups"`
-	Roles          []string                  `json:"roles"`
-	RealmRoles     []string                  `json:"realm_roles"`
-	RealmAccess    *struct{ Roles []string } `json:"realm_access"`
-	ResourceAccess map[string]struct {
-		Roles []string `json:"roles"`
-	} `json:"resource_access"`
+	Groups        []string `json:"groups"`
 }
 
 func (h *keycloakHandler) keycloakUsersPath() string {
@@ -77,67 +42,8 @@ func (h *keycloakHandler) keycloakGroupsPath() string {
 	return "groups"
 }
 
-func (h *keycloakHandler) keycloakRoleUsersPath(roleName string) string {
-	return fmt.Sprintf("roles/%s/users", roleName)
-}
-
-func (h *keycloakHandler) keycloakUserRoleMappingsCompositePath(userID string) string {
-	return fmt.Sprintf("users/%s/role-mappings/realm/composite", userID)
-}
-
 func (h *keycloakHandler) keycloakGroupMembersPath(groupID string) string {
 	return fmt.Sprintf("groups/%s/members", groupID)
-}
-
-// UnmarshalJSON fills userinfoResponse including Roles: realm roles plus client roles with "clientId:roleName" prefix.
-func (u *userinfoResponse) UnmarshalJSON(data []byte) error {
-	var dec userinfoDecode
-	if err := json.Unmarshal(data, &dec); err != nil {
-		return err
-	}
-	u.Sub = dec.Sub
-	u.PreferredName = dec.PreferredName
-	u.Email = dec.Email
-	u.Name = dec.Name
-	u.GivenName = dec.GivenName
-	u.FamilyName = dec.FamilyName
-	u.EmailVerified = dec.EmailVerified
-	u.Picture = dec.Picture
-	u.Groups = dec.Groups
-	u.Roles = rolesFromDecode(&dec)
-	return nil
-}
-
-// rolesFromDecode builds a single list: realm roles as-is, then each client role as "clientId:roleName".
-func rolesFromDecode(dec *userinfoDecode) []string {
-	var out []string
-	var realm []string
-	if len(dec.Roles) > 0 {
-		realm = dec.Roles
-	} else if len(dec.RealmRoles) > 0 {
-		realm = dec.RealmRoles
-	} else if dec.RealmAccess != nil && len(dec.RealmAccess.Roles) > 0 {
-		realm = dec.RealmAccess.Roles
-	}
-	for _, r := range realm {
-		if r != "" {
-			out = append(out, r)
-		}
-	}
-	if len(dec.ResourceAccess) > 0 {
-		for clientID, access := range dec.ResourceAccess {
-			clientID = strings.TrimSpace(clientID)
-			if clientID == "" {
-				continue
-			}
-			for _, r := range access.Roles {
-				if r != "" {
-					out = append(out, clientID+":"+r)
-				}
-			}
-		}
-	}
-	return out
 }
 
 func (h *keycloakHandler) keycloakGet(

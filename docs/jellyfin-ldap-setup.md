@@ -50,7 +50,7 @@ Fill the form with these exact values. For **LDAP Bind User Password** use the o
 Copy this into **LDAP Search Filter** (no backslashes):
 
 ```
-(|(memberOf=cn=watch-jellyfin,ou=roles,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local))
+(|(memberOf=cn=watch-jellyfin,cn=groups,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local))
 ```
 | **LDAP Search Attributes** | `uid, cn, mail, displayName, jpegPhoto` |
 | **LDAP Uid Attribute** | `uid` |
@@ -63,8 +63,8 @@ Copy this into **LDAP Search Filter** (no backslashes):
 
 | Field | Value |
 |-------|--------|
-| **LDAP Admin Base DN** | `ou=roles,dc=societycell,dc=local` (see Keycloak section for roles) |
-| **LDAP Admin Filter** | `(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local)` |
+| **LDAP Admin Base DN** | `cn=groups,dc=societycell,dc=local` |
+| **LDAP Admin Filter** | `(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local)` |
 | **Enable Admin Filter 'memberUid' mode** | Off |
 
 ### Testing
@@ -100,7 +100,7 @@ The LDAP bind user is the **Keycloak client** `glauth-ldap` (Applications → Cl
 - **Valid redirect URIs**: not required for LDAP.
 - **Client secret**: Stored in the glauth secret as `KEYCLOAK_LDAP_CLIENT_SECRET` and entered in Jellyfin as **LDAP Bind User Password**.
 
-**Service account must be allowed to search users and roles.** In Keycloak: **Clients** → **glauth-ldap** → **Service account roles** → **Assign role** → filter by client **realm-management** → assign **view-users**, **query-users**, **view-realm**. Without these, LDAP bind succeeds but user search returns “Operations Error”.
+**Service account must be allowed to search users and groups.** In Keycloak: **Clients** → **glauth-ldap** → **Service account roles** → **Assign role** → filter by client **realm-management** → assign **view-users**, **query-users**, **view-groups**. Without these, LDAP bind succeeds but user search returns “Operations Error”.
 
 ### 3.3 Optional: client for user password grant
 
@@ -137,17 +137,17 @@ To enable profile picture synchronization between Keycloak and Jellyfin:
 
 The plugin will automatically expose the Keycloak `picture` attribute as the LDAP `jpegPhoto` attribute, which Jellyfin will use to sync user avatars.
 
-### 3.5 Roles for Jellyfin (search filter and admin filter)
+### 3.5 Groups for Jellyfin (search filter and admin filter)
 
-The plugin exposes Keycloak realm roles as LDAP `memberOf` under `ou=roles,dc=<domain>,dc=<tld>`.
+The plugin exposes Keycloak groups as LDAP `memberOf` under `cn=groups,dc=<domain>,dc=<tld>`.
 
-- In Keycloak: **Realm roles** → create `watch-jellyfin` (users who can log in) and `manage-jellyfin` (Jellyfin admins).
-- Assign **watch-jellyfin** to users who should access Jellyfin; assign **manage-jellyfin** to users who should be Jellyfin administrators.
-- **LDAP Search Filter** (who can log in): `(|(memberOf=cn=watch-jellyfin,ou=roles,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local))`
-- **LDAP Admin Base DN**: `ou=roles,dc=societycell,dc=local`
-- **LDAP Admin Filter**: `(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local)`
+- In Keycloak: **Groups** → create `watch-jellyfin` (users who can log in) and `manage-jellyfin` (Jellyfin admins).
+- Assign users to those groups (not realm roles).
+- **LDAP Search Filter** (who can log in): `(|(memberOf=cn=watch-jellyfin,cn=groups,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local))`
+- **LDAP Admin Base DN**: `cn=groups,dc=societycell,dc=local`
+- **LDAP Admin Filter**: `(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local)`
 
-**Composite/Inherited Roles:** The plugin uses `GET /admin/realms/{realm}/users/{userId}/role-mappings/realm/composite` to get each user's effective roles, so users who inherit `watch-jellyfin` or `manage-jellyfin` through composite roles or group membership are included in search results.
+On the LDAP client used for user login, add a **Group Membership** mapper with **Add to userinfo** enabled so bound users get `memberOf` from their groups claim.
 
 ---
 
@@ -191,5 +191,5 @@ You should see `bind: success` and a list of users (e.g. `parthenona`, `test`). 
 | **User search base** | `cn=users,dc=societycell,dc=local` |
 | **Bind DN** | `cn=glauth-ldap,cn=bind,dc=societycell,dc=local` |
 | **User login** | Keycloak username = LDAP `uid` / `cn`; password = Keycloak password. |
-| **Search filter** | `(&#124;(memberOf=cn=watch-jellyfin,ou=roles,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local))` — create realm roles `watch-jellyfin` and `manage-jellyfin` in Keycloak. |
-| **Admin filter** | `(memberOf=cn=manage-jellyfin,ou=roles,dc=societycell,dc=local)` — assign realm role `manage-jellyfin` to Jellyfin admins in Keycloak. |
+| **Search filter** | `(&#124;(memberOf=cn=watch-jellyfin,cn=groups,dc=societycell,dc=local)(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local))` — create groups `watch-jellyfin` and `manage-jellyfin` in Keycloak. |
+| **Admin filter** | `(memberOf=cn=manage-jellyfin,cn=groups,dc=societycell,dc=local)` — add Jellyfin admins to the `manage-jellyfin` group in Keycloak. |
